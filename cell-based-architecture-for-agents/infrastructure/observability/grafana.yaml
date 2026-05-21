@@ -1,0 +1,273 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-datasources
+  namespace: observability
+data:
+  datasources.yaml: |
+    apiVersion: 1
+    datasources:
+      - name: Loki
+        type: loki
+        uid: loki
+        url: http://loki.observability.svc.cluster.local:3100
+        access: proxy
+        isDefault: false
+        jsonData:
+          derivedFields:
+            - datasourceUid: jaeger
+              matcherRegex: '"traceparent":"00-([a-f0-9]{32})-'
+              name: TraceID
+              url: "$${__value.raw}"
+
+      - name: Prometheus
+        type: prometheus
+        uid: prometheus
+        url: http://prometheus.observability.svc.cluster.local:9090
+        access: proxy
+        isDefault: true
+
+      - name: Jaeger
+        type: jaeger
+        uid: jaeger
+        url: http://jaeger.observability.svc.cluster.local:16686
+        access: proxy
+        isDefault: false
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboard-provisioning
+  namespace: observability
+data:
+  dashboards.yaml: |
+    apiVersion: 1
+    providers:
+      - name: 'Default Dashboards'
+        orgId: 1
+        folder: ''
+        type: file
+        disableDeletion: false
+        updateIntervalSeconds: 10
+        options:
+          path: /var/lib/grafana/dashboards
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboards
+  namespace: observability
+data:
+  pod-overview.json: |
+    {
+      "uid": "pod-observability",
+      "title": "Pod Overview: Logs, Metrics & Traces",
+      "timezone": "browser",
+      "refresh": "5s",
+      "schemaVersion": 36,
+      "templating": {
+        "list": [
+          {
+            "name": "namespace",
+            "type": "query",
+            "datasource": { "type": "loki", "uid": "loki" },
+            "query": {
+              "label": "namespace",
+              "refId": "StandardVariableQuery",
+              "stream": "{job=\"fluent-bit\"}",
+              "type": 1
+            },
+            "refresh": 2,
+            "includeAll": false,
+            "current": { "text": "customer-service-assistant-agent-cell", "value": "customer-service-assistant-agent-cell" }
+          },
+          {
+            "name": "pod",
+            "type": "query",
+            "datasource": { "type": "loki", "uid": "loki" },
+            "query": {
+              "label": "pod",
+              "refId": "StandardVariableQuery",
+              "stream": "{job=\"fluent-bit\", namespace=~\"$namespace\"}",
+              "type": 1
+            },
+            "refresh": 2,
+            "includeAll": true,
+            "multi": true
+          },
+          {
+            "name": "container",
+            "type": "query",
+            "datasource": { "type": "loki", "uid": "loki" },
+            "query": {
+              "label": "container",
+              "refId": "StandardVariableQuery",
+              "stream": "{job=\"fluent-bit\", namespace=~\"$namespace\", pod=~\"$pod\"}",
+              "type": 1
+            },
+            "refresh": 2,
+            "includeAll": true,
+            "multi": true
+          }
+        ]
+      },
+      "panels": [
+        {
+          "type": "timeseries",
+          "title": "Envoy Upstream Requests (Metrics)",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "prometheus" },
+              "expr": "sum by (envoy_cluster_name) (rate(cluster_upstream_rq_total[1m]))",
+              "legendFormat": "{{envoy_cluster_name}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "type": "timeseries",
+          "title": "Security Detections Over Time",
+          "datasource": {"type": "prometheus","uid": "prometheus"},
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0},
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "prometheus"},
+              "expr": "floor(sum by (provider, model) (increase(guardrails_pii_findings_total[30s])))",
+              "legendFormat": "PII - {{provider}} / {{model}}",
+              "refId": "A"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "prometheus"},
+              "expr": "floor(sum by (provider, model) (increase(guardrails_injections_findings_total[30s])))",
+              "legendFormat": "Injection - {{provider}} / {{model}}",
+              "refId": "B"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "drawStyle": "bars",
+                "fillOpacity": 80,
+                "stacking": {
+                  "group": "A",
+                  "mode": "normal"
+                }
+              },
+              "min": 0,
+              "decimals": 0
+            }
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi"
+            }
+          }
+        },
+        {
+          "type": "logs",
+          "title": "Live Pod Logs & Traces",
+          "datasource": { "type": "loki", "uid": "loki" },
+          "gridPos": { "h": 12, "w": 24, "x": 0, "y": 8 },
+          "targets": [
+            {
+              "datasource": { "type": "loki", "uid": "loki" },
+              "expr": "{namespace=~\"$namespace\", pod=~\"$pod\", container=~\"$container\"} !~ \"GET /(health|ready|healthz|livez|readyz)\" | json | line_format \"{{.log}}\" | json",
+              "refId": "A"
+            }
+          ],
+          "options": {
+            "showLabels": true,
+            "showTime": true,
+            "wrapLogMessage": true,
+            "enableLogDetails": true
+          },
+          "description": "Expand log lines containing a traceparent to automatically see a button linking to the Jaeger Trace."
+        }
+      ]
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: grafana
+  namespace: observability
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: grafana
+  template:
+    metadata:
+      labels:
+        app: grafana
+    spec:
+      containers:
+        - name: grafana
+          image: grafana/grafana:latest
+          ports:
+            - containerPort: 3000
+              name: http
+          env:
+            - name: GF_SECURITY_ADMIN_PASSWORD
+              value: admin
+            - name: GF_USERS_ALLOW_SIGN_UP
+              value: "false"
+            - name: GF_DATABASE_WAL
+              value: "true"
+            - name: GF_SERVER_ENABLE_GZIP
+              value: "true"
+          volumeMounts:
+            - name: datasources
+              mountPath: /etc/grafana/provisioning/datasources
+            - name: dashboard-provisioning
+              mountPath: /etc/grafana/provisioning/dashboards
+            - name: dashboards
+              mountPath: /var/lib/grafana/dashboards
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: 1000m
+              memory: 512Mi
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: 3000
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            failureThreshold: 6
+      volumes:
+        - name: datasources
+          configMap:
+            name: grafana-datasources
+        - name: dashboard-provisioning
+          configMap:
+            name: grafana-dashboard-provisioning
+        - name: dashboards
+          configMap:
+            name: grafana-dashboards
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: grafana
+  namespace: observability
+spec:
+  selector:
+    app: grafana
+  ports:
+    - name: http
+      port: 3000
+      targetPort: 3000

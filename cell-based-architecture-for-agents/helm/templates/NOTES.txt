@@ -1,0 +1,76 @@
+Cell-based AI Agent {{ .Chart.AppVersion }} deployed as release "{{ .Release.Name }}".
+
+Components installed:
+  customer-service-assistant-agent-cell ({{ .Values.customerServiceAssistantAgentCell.namespace }}) : ingress-gw, agent-core (+ auth-service sidecar), egress-gw (+ guardrails), intercell-gw
+  billing-investigation-agent-cell      ({{ .Values.billingInvestigationAgentCell.namespace }})    : agent-core (+ auth-sidecar), egress-gw (+ guardrails), intercell-gw
+  tools-cell                            ({{ .Values.toolsCell.namespace }})                        : tools-ingress-gw, tools-service, opa
+
+Before traffic flows, create the required Secrets (NOT managed by this chart).
+
+Easiest path — use the bootstrap script (idempotent; re-run to update):
+
+  cp scripts/.env.example scripts/.env
+  bash scripts/create-secrets.sh
+
+Or create them manually (only create egress API-key secrets for providers in use):
+
+  # customer-service-assistant-agent-cell
+  kubectl -n {{ .Values.customerServiceAssistantAgentCell.namespace }} create secret tls \
+      {{ .Values.customerServiceAssistantAgentCell.ingress.tlsSecretName }} \
+      --cert=<path/to/tls.crt> --key=<path/to/tls.key>
+  kubectl -n {{ .Values.customerServiceAssistantAgentCell.namespace }} create secret generic \
+      {{ .Values.customerServiceAssistantAgentCell.ingress.jwtValidationSecretName }} \
+      --from-literal=JWT_ISSUER="<issuer-url>" \
+      --from-literal=JWT_AUDIENCE="<audience>" \
+      --from-literal=JWKS_URI="<jwks-uri>" \
+      --from-literal=JWKS_HOST="<jwks-host>" \
+      --from-literal=CORS_ALLOW_ORIGIN="<allowed-origin>"
+  kubectl -n {{ .Values.customerServiceAssistantAgentCell.namespace }} create secret generic \
+      {{ .Values.customerServiceAssistantAgentCell.core.oauthCredentialsSecretName }} \
+      --from-literal=ASGARDEO_BASE_URL="<asgardeo-base-url>" \
+      --from-literal=CLIENT_ID="<client-id>" \
+      --from-literal=REDIRECT_URI="<redirect-uri>" \
+      --from-literal=AGENT_ID="<agent-id>" \
+      --from-literal=AGENT_SECRET="<agent-secret>"
+  kubectl -n {{ .Values.customerServiceAssistantAgentCell.namespace }} create secret generic \
+      {{ .Values.customerServiceAssistantAgentCell.egress.openaiApiKeySecretName }} --from-literal=api-key=<key>
+  kubectl -n {{ .Values.customerServiceAssistantAgentCell.namespace }} create secret generic \
+      {{ .Values.customerServiceAssistantAgentCell.egress.anthropicApiKeySecretName }} --from-literal=api-key=<key>
+  kubectl -n {{ .Values.customerServiceAssistantAgentCell.namespace }} create secret generic \
+      {{ .Values.customerServiceAssistantAgentCell.egress.geminiApiKeySecretName }} --from-literal=api-key=<key>
+
+  # billing-investigation-agent-cell
+  kubectl -n {{ .Values.billingInvestigationAgentCell.namespace }} create secret generic \
+      {{ .Values.billingInvestigationAgentCell.core.oauthCredentialsSecretName }} \
+      --from-literal=ASGARDEO_BASE_URL="<asgardeo-base-url>" \
+      --from-literal=CLIENT_ID="<client-id>" \
+      --from-literal=AGENT_ID="<agent-id>" \
+      --from-literal=AGENT_SECRET="<agent-secret>"
+  kubectl -n {{ .Values.billingInvestigationAgentCell.namespace }} create secret generic \
+      {{ .Values.billingInvestigationAgentCell.egress.openaiApiKeySecretName }} --from-literal=api-key=<key>
+  kubectl -n {{ .Values.billingInvestigationAgentCell.namespace }} create secret generic \
+      {{ .Values.billingInvestigationAgentCell.egress.anthropicApiKeySecretName }} --from-literal=api-key=<key>
+  kubectl -n {{ .Values.billingInvestigationAgentCell.namespace }} create secret generic \
+      {{ .Values.billingInvestigationAgentCell.egress.geminiApiKeySecretName }} --from-literal=api-key=<key>
+  kubectl -n {{ .Values.billingInvestigationAgentCell.namespace }} create secret generic \
+      {{ .Values.billingInvestigationAgentCell.intercell.jwtValidationSecretName }} \
+      --from-literal=JWT_ISSUER="<issuer-url>" \
+      --from-literal=JWT_AUDIENCE="<audience>" \
+      --from-literal=JWKS_URI="<jwks-uri>" \
+      --from-literal=JWKS_HOST="<jwks-host>"
+
+  # tools-cell
+  kubectl -n {{ .Values.toolsCell.namespace }} create secret generic \
+      {{ .Values.toolsCell.ingress.jwtValidationSecretName }} \
+      --from-literal=JWT_ISSUER="<issuer-url>" \
+      --from-literal=JWT_AUDIENCE="<audience>" \
+      --from-literal=JWKS_URI="<jwks-uri>" \
+      --from-literal=JWKS_HOST="<jwks-host>"
+
+Check pod status:
+  kubectl get pods -n {{ .Values.customerServiceAssistantAgentCell.namespace }}
+  kubectl get pods -n {{ .Values.billingInvestigationAgentCell.namespace }}
+  kubectl get pods -n {{ .Values.toolsCell.namespace }}
+
+Test the ingress gateway (NodePort {{ .Values.customerServiceAssistantAgentCell.ingress.nodePort }}):
+  curl -k https://<node-ip>:{{ .Values.customerServiceAssistantAgentCell.ingress.nodePort }}/health

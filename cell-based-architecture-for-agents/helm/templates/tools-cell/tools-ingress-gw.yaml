@@ -1,0 +1,148 @@
+﻿---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: tools-ingress-gw
+  namespace: {{ .Values.toolsCell.namespace }}
+  labels:
+    {{- include "cell-based-agent.labels" . | nindent 4 }}
+    app.kubernetes.io/name: tools-ingress-gw
+    app.kubernetes.io/component: gateway
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: tools-ingress-gw-config
+  namespace: {{ .Values.toolsCell.namespace }}
+  labels:
+    {{- include "cell-based-agent.labels" . | nindent 4 }}
+    app.kubernetes.io/name: tools-ingress-gw
+    app.kubernetes.io/component: gateway
+data:
+  envoy.yaml: |
+{{ .Files.Get "files/tools-cell/ingress-envoy.yaml" | indent 4 }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tools-ingress-gw
+  namespace: {{ .Values.toolsCell.namespace }}
+  labels:
+    {{- include "cell-based-agent.labels" . | nindent 4 }}
+    app.kubernetes.io/name: tools-ingress-gw
+    app.kubernetes.io/component: gateway
+spec:
+  replicas: {{ .Values.toolsCell.ingress.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: tools-ingress-gw
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: tools-ingress-gw
+        app.kubernetes.io/component: gateway
+    spec:
+      serviceAccountName: tools-ingress-gw
+      securityContext:
+        {{- include "cell-based-agent.podSecurityContext" . | nindent 8 }}
+      initContainers:
+        - name: envsubst
+          image: {{ .Values.toolsCell.ingress.envsubstImage }}
+          command: ["sh", "-c", "envsubst < /config-template/envoy.yaml > /etc/envoy/envoy.yaml"]
+          env:
+            - name: OTEL_COLLECTOR_HOST
+              value: {{ .Values.global.otelCollectorHost | quote }}
+            - name: JWT_ISSUER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.toolsCell.ingress.jwtValidationSecretName }}
+                  key: JWT_ISSUER
+            - name: JWT_AUDIENCE
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.toolsCell.ingress.jwtValidationSecretName }}
+                  key: JWT_AUDIENCE
+            - name: JWKS_URI
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.toolsCell.ingress.jwtValidationSecretName }}
+                  key: JWKS_URI
+            - name: JWKS_HOST
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.toolsCell.ingress.jwtValidationSecretName }}
+                  key: JWKS_HOST
+          volumeMounts:
+            - name: envoy-config-template
+              mountPath: /config-template
+            - name: envoy-config-rendered
+              mountPath: /etc/envoy
+          securityContext:
+            runAsUser: 1000
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+      containers:
+        - name: envoy
+          image: {{ .Values.toolsCell.ingress.envoyImage }}
+          args: ["-c", "/etc/envoy/envoy.yaml", "--service-cluster", "tools-ingress-gw"]
+          ports:
+            - containerPort: 8443
+              name: https
+          volumeMounts:
+            - name: envoy-config-rendered
+              mountPath: /etc/envoy
+              readOnly: true
+            - name: spire-agent-socket
+              mountPath: /run/spire/sockets
+              readOnly: true
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          securityContext:
+            runAsUser: 101
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          readinessProbe:
+            tcpSocket:
+              port: 8443
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: 8443
+            initialDelaySeconds: 10
+            periodSeconds: 30
+      volumes:
+        - name: envoy-config-template
+          configMap:
+            name: tools-ingress-gw-config
+        - name: envoy-config-rendered
+          emptyDir: {}
+        - name: spire-agent-socket
+          csi:
+            driver: csi.spiffe.io
+            readOnly: true
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: tools-ingress-gw
+  namespace: {{ .Values.toolsCell.namespace }}
+  labels:
+    {{- include "cell-based-agent.labels" . | nindent 4 }}
+    app.kubernetes.io/name: tools-ingress-gw
+    app.kubernetes.io/component: gateway
+spec:
+  selector:
+    app.kubernetes.io/name: tools-ingress-gw
+  ports:
+    - port: 8443
+      targetPort: 8443
+      name: https

@@ -1,0 +1,323 @@
+# Ingress Gateway 
+
+node:
+  id: "tools-ingress-gw"
+  cluster: "tools-ingress-gw"
+
+# Tracing
+tracing:
+  http:
+    name: envoy.tracers.opentelemetry
+    typed_config:
+      "@type": type.googleapis.com/envoy.config.trace.v3.OpenTelemetryConfig
+      grpc_service:
+        envoy_grpc:
+          cluster_name: otel_collector
+        timeout: 5s
+      service_name: "tools-ingress-gateway"
+      resource_detectors:
+        - name: envoy.tracers.opentelemetry.resource_detectors.environment
+          typed_config:
+            "@type": type.googleapis.com/envoy.extensions.tracers.opentelemetry.resource_detectors.v3.EnvironmentResourceDetectorConfig
+
+# Metrics
+stats_sinks:
+  - name: envoy.stat_sinks.open_telemetry
+    typed_config:
+      "@type": type.googleapis.com/envoy.extensions.stat_sinks.open_telemetry.v3.SinkConfig
+      grpc_service:
+        envoy_grpc:
+          cluster_name: otel_collector
+        timeout: 5s
+      report_counters_as_deltas: true
+
+stats_flush_interval: 15s
+
+static_resources:
+  listeners:
+    - name: tools_ingress_listener
+      address:
+        socket_address:
+          address: 0.0.0.0
+          port_value: 8443
+      filter_chains:
+        - transport_socket:
+            name: envoy.transport_sockets.tls
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.DownstreamTlsContext
+              require_client_certificate: true    # mTLS — client must present cert
+              common_tls_context:
+                # Server certificate: SPIFFE ID of this gateway 
+                tls_certificate_sds_secret_configs:
+                  - name: "default"
+                    sds_config:
+                      resource_api_version: V3
+                      api_config_source:
+                        api_type: GRPC
+                        transport_api_version: V3
+                        grpc_services:
+                          - google_grpc:
+                              target_uri: "unix:/run/spire/sockets/api.sock"
+                              stat_prefix: spire_sds
+                              channel_credentials:
+                                local_credentials: {}
+                # Peer validation: trust bundle for the cluster trust domain 
+                combined_validation_context:
+                  default_validation_context:
+                    # Restrict which workloads can call by pinning to their SPIFFE IDs.
+                    match_typed_subject_alt_names:
+                      - san_type: URI
+                        matcher:
+                          exact: "spiffe://example.org/ns/customer-service-assistant-agent-cell/sa/intercell-gw"
+                      - san_type: URI
+                        matcher:
+                          exact: "spiffe://example.org/ns/billing-investigation-agent-cell/sa/intercell-gw"
+                  validation_context_sds_secret_config:
+                    name: "ROOTCA"
+                    sds_config:
+                      resource_api_version: V3
+                      api_config_source:
+                        api_type: GRPC
+                        transport_api_version: V3
+                        grpc_services:
+                          - google_grpc:
+                              target_uri: "unix:/run/spire/sockets/api.sock"
+                              stat_prefix: spire_sds
+                              channel_credentials:
+                                local_credentials: {}
+          filters:
+            - name: envoy.filters.network.http_connection_manager
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                stat_prefix: tools_ingress_gw
+                codec_type: AUTO
+
+                # Forward the client certificate SAN to OPA via ext_authz metadata
+                forward_client_cert_details: SANITIZE_SET
+                set_current_client_cert_details:
+                  uri: true
+
+                request_id_extension:
+                  typed_config:
+                    "@type": type.googleapis.com/envoy.extensions.request_id.uuid.v3.UuidRequestIdConfig
+                    use_request_id_for_trace_sampling: true
+
+                tracing:
+                  provider:
+                    name: envoy.tracers.opentelemetry
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.config.trace.v3.OpenTelemetryConfig
+                      grpc_service:
+                        envoy_grpc:
+                          cluster_name: otel_collector
+                        timeout: 5s
+                      service_name: "tools-ingress-gateway"
+                  random_sampling:
+                    value: 100
+                  custom_tags:
+                    - tag: "cell.gateway"
+                      literal:
+                        value: "tools-ingress"
+                    - tag: "agent.id"
+                      request_header:
+                        name: x-agent-id
+                        default_value: "unknown"
+                    - tag: "enduser.sub"
+                      metadata:
+                        kind: { request: {} }
+                        metadata_key:
+                          key: envoy.filters.http.jwt_authn
+                          path:
+                            - { key: jwt_payload }
+                            - { key: sub }
+                    - tag: "enduser.scope"
+                      metadata:
+                        kind: { request: {} }
+                        metadata_key:
+                          key: envoy.filters.http.jwt_authn
+                          path:
+                            - { key: jwt_payload }
+                            - { key: scope }
+
+                access_log:
+                  - name: envoy.access_loggers.stdout
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.access_loggers.stream.v3.StdoutAccessLog
+                      log_format:
+                        json_format:
+                          timestamp:        "%START_TIME%"
+                          direction:        "tools-ingress"
+                          method:           "%REQ(:METHOD)%"
+                          path:             "%REQ(:PATH)%"
+                          upstream_cluster: "%UPSTREAM_CLUSTER%"
+                          status:           "%RESPONSE_CODE%"
+                          response_flags:   "%RESPONSE_FLAGS%"
+                          duration_ms:      "%DURATION%"
+                          bytes_sent:       "%BYTES_SENT%"
+                          bytes_received:   "%BYTES_RECEIVED%"
+                          request_id:       "%REQ(X-REQUEST-ID)%"
+                          traceparent:      "%REQ(traceparent)%"
+                          authz_status:     "%DYNAMIC_METADATA(envoy.filters.http.ext_authz:ext_authz_status)%"
+                          service:          "tools-ingress-gateway"
+                          invoker_agent_id: "%REQ(x-agent-id)%"
+                          invoker_user:     "%DYNAMIC_METADATA(envoy.filters.http.jwt_authn:jwt_payload:sub)%"
+                          invoker_role:     "%DYNAMIC_METADATA(envoy.filters.http.jwt_authn:jwt_payload:roles)%"
+                          invoker_scope:    "%DYNAMIC_METADATA(envoy.filters.http.jwt_authn:jwt_payload:scope)%"
+
+                http_filters:
+                  # 1. Token Validation 
+                  - name: envoy.filters.http.jwt_authn
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.jwt_authn.v3.JwtAuthentication
+                      providers:
+                        idp_obo:
+                          issuer: "${JWT_ISSUER}"
+                          audiences:
+                            - "${JWT_AUDIENCE}"
+                          from_headers:
+                            - name: authorization
+                              value_prefix: "Bearer "
+                          remote_jwks:
+                            http_uri:
+                              uri: "${JWKS_URI}"
+                              cluster: jwks_cluster
+                              timeout: 5s
+                            cache_duration:
+                              seconds: 300
+                          payload_in_metadata: "jwt_payload"
+                          forward: true       # Keep token for audit logging
+                      rules:
+                        - match: { prefix: /mcp }
+                          requires:
+                            requires_any:
+                              requirements:
+                                - provider_name: idp_obo
+                                - allow_missing: {}
+                        - match: { prefix: /health }
+                          requires: { allow_missing_or_failed: {} }
+
+                  # 2. Policy Authorization (ext_authz)
+                  - name: envoy.filters.http.ext_authz
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.ext_authz.v3.ExtAuthz
+                      transport_api_version: V3
+                      grpc_service:
+                        envoy_grpc:
+                          cluster_name: opa_authz
+                        timeout: 5s
+                      failure_mode_allow: false          # Deny if OPA is unreachable
+                      include_peer_certificate: true      # Send client cert info to OPA
+                      metadata_context_namespaces:
+                        - "envoy.filters.http.jwt_authn"  # Forward validated JWT claims 
+                      with_request_body:
+                        max_request_bytes: 16384
+                        allow_partial_message: true
+
+                  - name: envoy.filters.http.router
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+                      start_child_span: true
+
+                route_config:
+                  name: tools_routes
+                  virtual_hosts:
+                    - name: tools
+                      domains: ["*"]
+                      routes:
+                        # MCP streamable-HTTP transport
+                        # GET — persistent SSE listen stream (server→client notifications)
+                        - match:
+                            prefix: /mcp
+                            headers:
+                              - name: ":method"
+                                exact_match: "GET"
+                          route:
+                            cluster: tools_service
+                            timeout: 0s
+                            idle_timeout: 0s
+
+                        # POST — JSON-RPC tool invocations
+                        - match:
+                            prefix: /mcp
+                          route:
+                            cluster: tools_service
+                            timeout: 60s
+
+  clusters:
+    # Tools Service (upstream — plain HTTP, same namespace)
+    - name: tools_service
+      type: STRICT_DNS
+      lb_policy: ROUND_ROBIN
+      load_assignment:
+        cluster_name: tools_service
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address:
+                      address: tools-service
+                      port_value: 8090
+
+    # OPA (ext_authz gRPC)
+    - name: opa_authz
+      type: STRICT_DNS
+      lb_policy: ROUND_ROBIN
+      typed_extension_protocol_options:
+        envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+          "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+          explicit_http_config:
+            http2_protocol_options: {}    # gRPC requires HTTP/2
+      load_assignment:
+        cluster_name: opa_authz
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address:
+                      address: opa
+                      port_value: 9191
+
+    # JWKS (IdP public keys for token verification)
+    - name: jwks_cluster
+      type: STRICT_DNS
+      lb_policy: ROUND_ROBIN
+      transport_socket:
+        name: envoy.transport_sockets.tls
+        typed_config:
+          "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext
+          common_tls_context:
+            validation_context:
+              trusted_ca:
+                filename: /etc/ssl/certs/ca-certificates.crt
+      load_assignment:
+        cluster_name: jwks_cluster
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address:
+                      address: "${JWKS_HOST}"
+                      port_value: 443
+
+    # OTel Collector
+    - name: otel_collector
+      type: STRICT_DNS
+      lb_policy: ROUND_ROBIN
+      typed_extension_protocol_options:
+        envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+          "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+          explicit_http_config:
+            http2_protocol_options: {}
+      load_assignment:
+        cluster_name: otel_collector
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address: { address: "${OTEL_COLLECTOR_HOST}", port_value: 4317 }
+
+admin:
+  address:
+    socket_address:
+      address: 127.0.0.1
+      port_value: 9904

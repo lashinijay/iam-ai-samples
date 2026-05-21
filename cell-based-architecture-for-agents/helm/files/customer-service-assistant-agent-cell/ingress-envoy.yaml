@@ -1,0 +1,380 @@
+# Ingress Gateway 
+
+# Tracing
+# OTel tracer: reads/propagates W3C traceparent; starts new trace if absent.
+# Spans exported via gRPC to otel_collector cluster.
+tracing:
+  http:
+    name: envoy.tracers.opentelemetry
+    typed_config:
+      "@type": type.googleapis.com/envoy.config.trace.v3.OpenTelemetryConfig
+      grpc_service:
+        envoy_grpc:
+          cluster_name: otel_collector
+        timeout: 5s
+      service_name: "ingress-gateway"
+      resource_detectors:
+        - name: envoy.tracers.opentelemetry.resource_detectors.environment
+          typed_config:
+            "@type": type.googleapis.com/envoy.extensions.tracers.opentelemetry.resource_detectors.v3.EnvironmentResourceDetectorConfig
+
+# Metrics sink
+# All Envoy stats (counters/gauges/histograms) exported as OTLP every 15 s.
+stats_sinks:
+  - name: envoy.stat_sinks.open_telemetry
+    typed_config:
+      "@type": type.googleapis.com/envoy.extensions.stat_sinks.open_telemetry.v3.SinkConfig
+      grpc_service:
+        envoy_grpc:
+          cluster_name: otel_collector
+        timeout: 5s
+      report_counters_as_deltas: true
+
+stats_flush_interval: 15s
+
+static_resources:
+  listeners:
+    - name: external_listener
+      address:
+        socket_address:
+          address: 0.0.0.0
+          port_value: 8443
+      filter_chains:
+        - transport_socket:
+            name: envoy.transport_sockets.tls
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.DownstreamTlsContext
+              common_tls_context:
+                tls_certificates:
+                  - certificate_chain:
+                      filename: /etc/envoy-certs/tls.crt
+                    private_key:
+                      filename: /etc/envoy-certs/tls.key
+                alpn_protocols: ["h2", "http/1.1"]
+              require_client_certificate: false
+          filters:
+            - name: envoy.filters.network.http_connection_manager
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                stat_prefix: ingress_gw
+                codec_type: AUTO
+
+                # 1. Request ID — generates UUID, enables trace sampling
+                request_id_extension:
+                  typed_config:
+                    "@type": type.googleapis.com/envoy.extensions.request_id.uuid.v3.UuidRequestIdConfig
+                    use_request_id_for_trace_sampling: true
+
+                # Tracing: 100% sampling, custom span tags from JWT metadata
+                tracing:
+                  provider:
+                    name: envoy.tracers.opentelemetry
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.config.trace.v3.OpenTelemetryConfig
+                      grpc_service:
+                        envoy_grpc:
+                          cluster_name: otel_collector
+                        timeout: 5s
+                      service_name: "ingress-gateway"
+                  random_sampling:
+                    value: 100
+                  custom_tags:
+                    - tag: "enduser.id"
+                      metadata:
+                        kind:
+                          request: {}
+                        metadata_key:
+                          key: envoy.filters.http.jwt_authn
+                          path:
+                            - key: jwt_payload
+                            - key: sub
+                    - tag: "enduser.scope"
+                      metadata:
+                        kind:
+                          request: {}
+                        metadata_key:
+                          key: envoy.filters.http.jwt_authn
+                          path:
+                            - key: jwt_payload
+                            - key: scope
+                    - tag: "cell.gateway"
+                      literal:
+                        value: "ingress"
+
+                access_log:
+                  - name: envoy.access_loggers.stdout
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.access_loggers.stream.v3.StdoutAccessLog
+                      log_format:
+                        json_format:
+                          timestamp:        "%START_TIME%"
+                          method:           "%REQ(:METHOD)%"
+                          path:             "%REQ(:PATH)%"
+                          protocol:         "%PROTOCOL%"
+                          status:           "%RESPONSE_CODE%"
+                          response_flags:   "%RESPONSE_FLAGS%"
+                          duration_ms:      "%DURATION%"
+                          bytes_sent:       "%BYTES_SENT%"
+                          bytes_received:   "%BYTES_RECEIVED%"
+                          client_ip:        "%DOWNSTREAM_REMOTE_ADDRESS_WITHOUT_PORT%"
+                          upstream_host:    "%UPSTREAM_HOST%"
+                          upstream_cluster: "%UPSTREAM_CLUSTER%"
+                          request_id:       "%REQ(X-REQUEST-ID)%"
+                          traceparent:      "%REQ(traceparent)%"
+                          user_sub:          "%DYNAMIC_METADATA(envoy.filters.http.jwt_authn:jwt_payload:sub)%"
+                          user_scope:        "%DYNAMIC_METADATA(envoy.filters.http.jwt_authn:jwt_payload:scope)%"
+                          user_roles:        "%DYNAMIC_METADATA(envoy.filters.http.jwt_authn:jwt_payload:roles)%"
+                          service:          "ingress-gateway"
+
+                http_filters:
+
+              
+                  # 1. JWT authn — validates signature (JWKS), exp, nbf, iss, aud.
+                  #    Writes decoded payload to dynamic metadata (key: jwt_payload).
+                  - name: envoy.filters.http.jwt_authn
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.jwt_authn.v3.JwtAuthentication
+                      providers:
+                        idp:
+                          issuer: "${JWT_ISSUER}"
+                          audiences:
+                            - "${JWT_AUDIENCE}"
+                          remote_jwks:
+                            http_uri:
+                              uri: "${JWKS_URI}"
+                              cluster: jwks_cluster
+                              timeout: 5s
+                            cache_duration:
+                              seconds: 300
+                            retry_policy:
+                              retry_back_off:
+                                base_interval: 0.5s
+                                max_interval: 10s
+                              num_retries: 3
+                          forward: false            # Do NOT forward user token downstream
+                          payload_in_metadata: "jwt_payload"
+                          claim_to_headers:
+                            - header_name: x-user-sub
+                              claim_name: sub
+                            - header_name: x-user-role
+                              claim_name: roles
+                          clock_skew_seconds: 30
+                      rules:
+                        - match: { prefix: /api/ }
+                          requires: { provider_name: idp }
+                        - match: { prefix: /health }
+                          requires: { allow_missing_or_failed: {} }
+                    
+
+                  # 2. RBAC — reads scope claim from jwt_payload metadata.
+                  #    Global default: DENY. Per-route policies define ALLOW rules.
+                  - name: envoy.filters.http.rbac
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.rbac.v3.RBAC
+                      rules:
+                        action: DENY
+                        policies: {}
+
+                  # 3. Rate limiting — 60 req/min per connection
+                  - name: envoy.filters.http.local_ratelimit
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.local_ratelimit.v3.LocalRateLimit
+                      stat_prefix: ingress_rate_limit
+                      token_bucket:
+                        max_tokens: 60
+                        tokens_per_fill: 60
+                        fill_interval: 60s
+                      filter_enabled:
+                        runtime_key: local_rate_limit_enabled
+                        default_value: { numerator: 100, denominator: HUNDRED }
+                      filter_enforced:
+                        runtime_key: local_rate_limit_enforced
+                        default_value: { numerator: 100, denominator: HUNDRED }
+                      response_headers_to_add:
+                        - append_action: OVERWRITE_IF_EXISTS_OR_ADD
+                          header: { key: x-ratelimit-limit, value: "60" }
+                      status: { code: 429 }
+
+                  # 4. Router — upstream call emitted as child span
+                  - name: envoy.filters.http.router
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+                      start_child_span: true
+
+                route_config:
+                  name: ingress_routes
+                  virtual_hosts:
+                    - name: agent_cell
+                      domains: ["*"]
+                      request_headers_to_add:
+                        - header: { key: x-cell-gateway, value: ingress }
+                          append_action: OVERWRITE_IF_EXISTS_OR_ADD
+                      response_headers_to_add:
+                        - header: { key: access-control-allow-origin, value: "${CORS_ALLOW_ORIGIN}" }
+                          append_action: OVERWRITE_IF_EXISTS_OR_ADD
+                        - header: { key: access-control-allow-credentials, value: "true" }
+                          append_action: OVERWRITE_IF_EXISTS_OR_ADD
+                      routes:
+
+                        # CORS preflight — OPTIONS requests carry no auth header, must bypass jwt_authn + RBAC.
+                        # Returns 200 with CORS headers before any auth filter runs.
+                        - match:
+                            prefix: /
+                            headers:
+                              - name: ":method"
+                                string_match: { exact: OPTIONS }
+                          direct_response:
+                            status: 200
+                            body:
+                              inline_string: ""
+                          response_headers_to_add:
+                            - header: { key: access-control-allow-origin,  value: "${CORS_ALLOW_ORIGIN}" }
+                              append_action: OVERWRITE_IF_EXISTS_OR_ADD
+                            - header: { key: access-control-allow-methods, value: "GET, POST, PUT, DELETE, OPTIONS" }
+                              append_action: OVERWRITE_IF_EXISTS_OR_ADD
+                            - header: { key: access-control-allow-headers, value: "authorization, content-type, x-request-id" }
+                              append_action: OVERWRITE_IF_EXISTS_OR_ADD
+                            - header: { key: access-control-allow-credentials, value: "true" }
+                              append_action: OVERWRITE_IF_EXISTS_OR_ADD
+                            - header: { key: access-control-max-age, value: "86400" }
+                              append_action: OVERWRITE_IF_EXISTS_OR_ADD
+                          typed_per_filter_config:
+                            envoy.filters.http.jwt_authn:
+                              "@type": type.googleapis.com/envoy.extensions.filters.http.jwt_authn.v3.PerRouteConfig
+                              disabled: true
+                            envoy.filters.http.rbac:
+                              "@type": type.googleapis.com/envoy.extensions.filters.http.rbac.v3.RBACPerRoute
+                              rbac:
+                                rules:
+                                  action: ALLOW
+                                  policies:
+                                    allow_all:
+                                      principals: [{ any: true }]
+                                      permissions: [{ any: true }]
+
+                        # /oauth/* — agent consent flow; no JWT auth required (browser redirect target)
+                        - match: { prefix: /oauth/ }
+                          route:
+                            cluster: auth_service
+                            timeout: 30s
+                          typed_per_filter_config:
+                            envoy.filters.http.jwt_authn:
+                              "@type": type.googleapis.com/envoy.extensions.filters.http.jwt_authn.v3.PerRouteConfig
+                              disabled: true
+                            envoy.filters.http.rbac:
+                              "@type": type.googleapis.com/envoy.extensions.filters.http.rbac.v3.RBACPerRoute
+                              rbac:
+                                rules:
+                                  action: ALLOW
+                                  policies:
+                                    allow_all:
+                                      principals: [{ any: true }]
+                                      permissions: [{ any: true }]
+
+                        # /api/agents/customer_service/ — requires scope agent:customer_service:invoke
+                        - match: { prefix: /api/agents/customer_service/ }
+                          route:
+                            cluster: agent_core
+                            timeout: 120s
+                            retry_policy:
+                              retry_on: "5xx,reset,connect-failure"
+                              num_retries: 2
+                          typed_per_filter_config:
+                            envoy.filters.http.rbac:
+                              "@type": type.googleapis.com/envoy.extensions.filters.http.rbac.v3.RBACPerRoute
+                              rbac:
+                                rules:
+                                  action: ALLOW
+                                  policies:
+                                    customer_service_scope:
+                                      principals:
+                                        - metadata:
+                                            filter: envoy.filters.http.jwt_authn
+                                            path:
+                                              - key: jwt_payload
+                                              - key: scope
+                                            value:
+                                              string_match:
+                                                safe_regex:
+                                                  regex: "(^|.*\\s)agent:customer_service:invoke(\\s.*|$)"
+                                      permissions: [{ any: true }]
+
+                        # /health — liveness probe; no JWT or RBAC required
+                        - match: { prefix: /health }
+                          direct_response:
+                            status: 200
+                            body:
+                              inline_string: '{"status":"healthy","gateway":"ingress"}'
+                          typed_per_filter_config:
+                            envoy.filters.http.rbac:
+                              "@type": type.googleapis.com/envoy.extensions.filters.http.rbac.v3.RBACPerRoute
+                              rbac:
+                                rules:
+                                  action: ALLOW
+                                  policies:
+                                    allow_all:
+                                      principals: [{ any: true }]
+                                      permissions: [{ any: true }]
+
+  clusters:
+    - name: agent_core
+      type: STRICT_DNS
+      lb_policy: ROUND_ROBIN
+      load_assignment:
+        cluster_name: agent_core
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address: { address: agent-core, port_value: 8080 }
+
+    # Auth Service sidecar — OAuth consent flow + token management.
+    - name: auth_service
+      type: STRICT_DNS
+      lb_policy: ROUND_ROBIN
+      load_assignment:
+        cluster_name: auth_service
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address: { address: agent-core, port_value: 8081 }
+
+    # JWKS — HTTPS cluster for fetching IdP public keys (cached 5 min by jwt_authn)
+    # Set JWKS_HOST to your identity provider API host, e.g. idp.example.com
+    - name: jwks_cluster
+      type: STRICT_DNS
+      lb_policy: ROUND_ROBIN
+      transport_socket:
+        name: envoy.transport_sockets.tls
+        typed_config:
+          "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext
+          sni: "${JWKS_HOST}"
+      load_assignment:
+        cluster_name: jwks_cluster
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address: { address: "${JWKS_HOST}", port_value: 443 }
+
+    # OTel Collector — single OTLP gRPC destination for traces, metrics, logs
+    - name: otel_collector
+      type: STRICT_DNS
+      lb_policy: ROUND_ROBIN
+      typed_extension_protocol_options:
+        envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+          "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+          explicit_http_config:
+            http2_protocol_options: {}
+      load_assignment:
+        cluster_name: otel_collector
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address: { address: "${OTEL_COLLECTOR_HOST}", port_value: 4317 }
+
+admin:
+  address:
+    socket_address: { address: 127.0.0.1, port_value: 9901 }

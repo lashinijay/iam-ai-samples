@@ -1,0 +1,6 @@
+apiVersion: v2
+name: cell-based-architecture-for-agent
+description: Adoption of cell-based architecture with zero trust security for AI agentic systems.
+type: application
+version: 0.1.0
+appVersion: "1.0.0"

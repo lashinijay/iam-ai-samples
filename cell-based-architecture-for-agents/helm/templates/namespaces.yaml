@@ -1,0 +1,28 @@
+﻿{{- if .Values.namespaces.create }}
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ .Values.customerServiceAssistantAgentCell.namespace }}
+  labels:
+    {{- include "cell-based-agent.labels" . | nindent 4 }}
+    app.kubernetes.io/part-of: customer-service-assistant-agent-cell
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ .Values.billingInvestigationAgentCell.namespace }}
+  labels:
+    {{- include "cell-based-agent.labels" . | nindent 4 }}
+    app.kubernetes.io/part-of: billing-investigation-agent-cell
+    io.cilium.k8s.policy.enforcement: "always"
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ .Values.toolsCell.namespace }}
+  labels:
+    {{- include "cell-based-agent.labels" . | nindent 4 }}
+    app.kubernetes.io/part-of: tools-cell
+    io.cilium.k8s.policy.enforcement: "always"
+{{- end }}

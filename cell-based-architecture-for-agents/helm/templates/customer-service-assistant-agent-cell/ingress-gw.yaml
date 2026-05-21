@@ -1,0 +1,140 @@
+﻿---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ingress-gw
+  namespace: {{ .Values.customerServiceAssistantAgentCell.namespace }}
+  labels:
+    {{- include "cell-based-agent.labels" . | nindent 4 }}
+    app.kubernetes.io/name: ingress-gw
+    app.kubernetes.io/component: gateway
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ingress-gw-envoy-config
+  namespace: {{ .Values.customerServiceAssistantAgentCell.namespace }}
+  labels:
+    {{- include "cell-based-agent.labels" . | nindent 4 }}
+    app.kubernetes.io/name: ingress-gw
+    app.kubernetes.io/component: gateway
+data:
+  envoy.yaml: |
+{{ .Files.Get "files/customer-service-assistant-agent-cell/ingress-envoy.yaml" | indent 4 }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ingress-gw
+  namespace: {{ .Values.customerServiceAssistantAgentCell.namespace }}
+  labels:
+    {{- include "cell-based-agent.labels" . | nindent 4 }}
+    app.kubernetes.io/name: ingress-gw
+    app.kubernetes.io/component: gateway
+spec:
+  replicas: {{ .Values.customerServiceAssistantAgentCell.ingress.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ingress-gw
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ingress-gw
+        app.kubernetes.io/component: gateway
+    spec:
+      serviceAccountName: ingress-gw
+      securityContext:
+        {{- include "cell-based-agent.podSecurityContext" . | nindent 8 }}
+      initContainers:
+        - name: envsubst
+          image: {{ .Values.customerServiceAssistantAgentCell.ingress.envsubstImage }}
+          command: ["sh", "-c", "envsubst < /config-template/envoy.yaml > /etc/envoy/envoy.yaml"]
+          envFrom:
+            - secretRef:
+                name: {{ .Values.customerServiceAssistantAgentCell.ingress.jwtValidationSecretName }}
+          env:
+            - name: OTEL_COLLECTOR_HOST
+              value: {{ .Values.global.otelCollectorHost | quote }}
+          volumeMounts:
+            - name: envoy-config-template
+              mountPath: /config-template
+            - name: envoy-config-rendered
+              mountPath: /etc/envoy
+          securityContext:
+            runAsUser: 1000
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+      containers:
+        - name: envoy
+          image: {{ .Values.customerServiceAssistantAgentCell.ingress.envoyImage }}
+          args: ["-c", "/etc/envoy/envoy.yaml", "--service-cluster", "ingress-gw"]
+          ports:
+            - containerPort: 8443
+              name: https
+              protocol: TCP
+          volumeMounts:
+            - name: envoy-config-rendered
+              mountPath: /etc/envoy
+              readOnly: true
+            - name: tls-certs
+              mountPath: /etc/envoy-certs
+              readOnly: true
+
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          securityContext:
+            runAsUser: 101
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8443
+              scheme: HTTPS
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8443
+              scheme: HTTPS
+            initialDelaySeconds: 10
+            periodSeconds: 30
+      volumes:
+        - name: envoy-config-template
+          configMap:
+            name: ingress-gw-envoy-config
+        - name: envoy-config-rendered
+          emptyDir: {}
+        - name: tls-certs
+          secret:
+            secretName: {{ .Values.customerServiceAssistantAgentCell.ingress.tlsSecretName }}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ingress-gw
+  namespace: {{ .Values.customerServiceAssistantAgentCell.namespace }}
+  labels:
+    {{- include "cell-based-agent.labels" . | nindent 4 }}
+    app.kubernetes.io/name: ingress-gw
+    app.kubernetes.io/component: gateway
+spec:
+  type: NodePort
+  selector:
+    app.kubernetes.io/name: ingress-gw
+  ports:
+    - port: 443
+      targetPort: 8443
+      nodePort: {{ .Values.customerServiceAssistantAgentCell.ingress.nodePort }}
+      name: https
+      protocol: TCP
