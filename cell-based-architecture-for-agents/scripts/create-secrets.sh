@@ -22,6 +22,21 @@ fi
 # shellcheck disable=SC1090
 set -a; source "${ENV_FILE}"; set +a
 
+required_vars=(
+  ASGARDEO_BASE_URL JWT_ISSUER JWKS_URI JWKS_HOST
+  CSA_JWT_AUDIENCE CORS_ALLOW_ORIGIN CSA_CLIENT_ID CSA_AGENT_ID CSA_AGENT_SECRET REDIRECT_URI
+  BIL_JWT_AUDIENCE BIL_CLIENT_ID BIL_CLIENT_SECRET BIL_REDIRECT_URI BIL_AGENT_ID BIL_AGENT_SECRET
+  TOOLS_JWT_AUDIENCE
+)
+
+for v in "${required_vars[@]}"; do
+  val="${!v:-}"
+  if [[ -z "${val}" || "${val}" =~ ^\<.*\>$ ]]; then
+    echo "error: required env var ${v} is missing or still a placeholder in ${ENV_FILE}" >&2
+    exit 1
+  fi
+done
+
 command -v kubectl >/dev/null || { echo "error: kubectl not on PATH" >&2; exit 1; }
 
 # Secret + namespace names — keep in sync with helm/values.yaml.
@@ -88,6 +103,8 @@ apply_llm_key "${CSA_NS}" "llm-api-key-gemini"    "${GEMINI_API_KEY}"
 apply_generic "${BIL_NS}" "agent-oauth-credentials" \
   "ASGARDEO_BASE_URL=${ASGARDEO_BASE_URL}" \
   "CLIENT_ID=${BIL_CLIENT_ID}" \
+  "CLIENT_SECRET=${BIL_CLIENT_SECRET}" \
+  "REDIRECT_URI=${BIL_REDIRECT_URI}" \
   "AGENT_ID=${BIL_AGENT_ID}" \
   "AGENT_SECRET=${BIL_AGENT_SECRET}"
 

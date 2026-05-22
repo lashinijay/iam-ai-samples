@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from urllib.parse import urlparse
 from uuid import uuid4
 
 import httpx
@@ -32,15 +33,23 @@ def _identity_headers(obo_token: str | None = None, agent_id: str = "", tracepar
 
 
 class RemoteAgentConnection:
-    """Connection to one A2A agent. resolve_card() must be called eagerly so the tool description is ready before the first request."""
-
-    def __init__(self, base_url: str):
-        self._base_url = base_url.rstrip("/")
+    
+    def __init__(self, canonical_url: str, egress_url: str):
+        self._canonical_url = canonical_url.rstrip("/") + "/"
+        self._egress_url = egress_url.rstrip("/") + "/"
+        self._canonical_host = urlparse(self._canonical_url).netloc
         self._card: AgentCard | None = None
         self._required_scopes: list[str] = []
 
+    def _route_headers(self, extra: dict[str, str] | None = None) -> dict[str, str]:
+        # Host header steers the caller's intercell-gw to the right callee cell.
+        headers = {"host": self._canonical_host}
+        if extra:
+            headers.update(extra)
+        return headers
+
     async def resolve_card(self, agent_id: str = "", traceparent: str = "") -> AgentCard:
-        headers = _identity_headers(agent_id=agent_id, traceparent=traceparent)
+        headers = self._route_headers(_identity_headers(agent_id=agent_id, traceparent=traceparent))
         async with httpx.AsyncClient(headers=headers, timeout=_CARD_TIMEOUT_S) as http:
             return await self._ensure_card(http)
 
@@ -48,8 +57,13 @@ class RemoteAgentConnection:
         if self._card is not None:
             return self._card
 
-        resolver = A2ACardResolver(http, self._base_url)
+        resolver = A2ACardResolver(http, self._egress_url.rstrip("/"))
         card = await resolver.get_agent_card()
+
+        # Card advertises the canonical URL; force the SDK to dial through our
+        # egress instead while we preserve the canonical Host header.
+        for iface in card.supported_interfaces:
+            iface.url = self._egress_url
 
         scopes: set[str] = set()
         for requirement in card.security_requirements:
@@ -59,8 +73,8 @@ class RemoteAgentConnection:
         self._required_scopes = sorted(scopes)
 
         logger.info(
-            "A2A card resolved: name=%s url=%s required_scopes=%s",
-            card.name, self._base_url, self._required_scopes,
+            "A2A card resolved: name=%s canonical=%s egress=%s required_scopes=%s",
+            card.name, self._canonical_url, self._egress_url, self._required_scopes,
         )
         return card
 
@@ -83,7 +97,9 @@ class RemoteAgentConnection:
         # TODO: exchange obo_token for a down-scoped token (limited to this
         # callee's required_scopes) before forwarding, instead of passing the
         # caller's broader token through unchanged.
-        headers = _identity_headers(obo_token=obo_token, agent_id=agent_id, traceparent=traceparent)
+        headers = self._route_headers(
+            _identity_headers(obo_token=obo_token, agent_id=agent_id, traceparent=traceparent)
+        )
 
         async with httpx.AsyncClient(headers=headers, timeout=_CARD_TIMEOUT_S) as http:
             card = await self._ensure_card(http)
@@ -98,7 +114,7 @@ class RemoteAgentConnection:
         )
         request = SendMessageRequest(message=msg)
 
-        logger.debug("A2A send_message → %s context_id=%s", self._base_url, msg.context_id)
+        logger.debug("A2A send_message → %s context_id=%s", self._canonical_url, msg.context_id)
 
         chunks: list[str] = []
         last_status_text = ""

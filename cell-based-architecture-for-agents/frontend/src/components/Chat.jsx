@@ -66,6 +66,8 @@ export default function Chat() {
   const textareaRef     = useRef(null)
   // Stores pending {text, sessionId} for auto-retry after consent popup.
   const pendingRetryRef = useRef(null)
+  // Handle to the consent popup; used to validate postMessage sender.
+  const consentPopupRef = useRef(null)
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -122,7 +124,7 @@ export default function Chat() {
           // Save pending request for auto-retry after consent.
           pendingRetryRef.current = { text, sessionId: data.session_id || activeSession }
           setConsentPending(true)
-          window.open(data.consent_url, 'agent_consent', 'width=520,height=640')
+          consentPopupRef.current = window.open(data.consent_url, 'agent_consent', 'width=520,height=640')
 
           const promptText =
             data.error === 'step_up_authentication_required'
@@ -165,10 +167,14 @@ export default function Chat() {
   // Listen for postMessage from auth-service callback; auto-retry pending request.
   useEffect(() => {
     const handleConsentComplete = (event) => {
+      // Only accept messages from the popup we opened — defends against
+      // unrelated windows/iframes spoofing the resume trigger.
+      if (!consentPopupRef.current || event.source !== consentPopupRef.current) return
       if (event.data?.type !== 'agent_consent_complete') return
       const pending = pendingRetryRef.current
       if (!pending) return
       pendingRetryRef.current = null
+      consentPopupRef.current = null
       setConsentPending(false)
       setMessages((prev) => [...prev, {
         id: nextId++, role: 'bot', text: 'Authorization complete — continuing your request…', timestamp: new Date(),

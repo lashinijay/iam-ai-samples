@@ -44,6 +44,8 @@ spec:
               value: "http://egress-gw.{{ .Values.customerServiceAssistantAgentCell.namespace }}.svc.cluster.local:8080"
             - name: INTERCELL_GW_URL
               value: "http://intercell-gw.{{ .Values.customerServiceAssistantAgentCell.namespace }}.svc.cluster.local:8080"
+            - name: BILLING_AGENT_URL
+              value: "http://intercell-gw.{{ .Values.billingInvestigationAgentCell.namespace }}.svc.cluster.local:8080/a2a/"
             - name: AUTH_SERVICE_URL
               value: "http://localhost:8081"
             - name: LOG_LEVEL

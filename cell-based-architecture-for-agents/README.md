@@ -292,15 +292,15 @@ Create a new MCP Server (e.g. `Customer Service Tools`)
 Navigate to **Applications → New Application → Single-Page Application**.
 
 - Name: `Cell Agent Chat UI`
-- Allowed redirect URL: `http://localhost:3000` (or wherever you serve the
-  frontend)
-- Change the **Access Token** type to **JWT**
-- Under **Access Token Attributes**, select **roles**
-- Under **API Authorization**: authorize the **Customer Service Assistant
+- Allowed redirect URL: `http://localhost:3000` 
+- Under **Protocol**:
+  - Change the **Access Token** type to **JWT**
+  - Under **Access Token Attributes**, select **roles**
+- Under **Authorization**: authorize the **Customer Service Assistant
   Agent API** with `agent:customer_service:invoke`
 - Under **Roles**: switch to **organization role audience**
 
-Capture: **client ID** → `VITE_REACT_APP_CLIENT_ID`, `CSA_JWT_AUDIENCE` in `frontend/.env`.
+Capture: **client ID** → `VITE_REACT_APP_CLIENT_ID`, `CSA_JWT_AUDIENCE` in `frontend/.env` and  `scripts/.env` respectively.
 
 #### 5.5 — Create Application for Customer Service Assistant Agent
 
@@ -310,9 +310,10 @@ Navigate to **Applications → New Application → Standard-Based** and enable
 - Name: `Customer Service Assistant Agent`
 - Enable **Code** grant with redirect URL
   `https://localhost:30443/oauth/callback`
-- Enable **public client**
-- Under **Access Token Attributes**, select **roles**
-- Set **Audience** to the Customer Service Tools MCP server identifier
+- Under **Protocol**:
+  - Enable **public client**
+  - Under **Access Token Attributes**, select **roles**
+  - Set **Audience** to the Customer Service Tools MCP server identifier
 - Under **API Authorization**:
   - Authorize the **Customer Service Tools** MCP server with: `crm:read`,
     `crm:write`, `billing:read`, `tickets:write`
@@ -326,8 +327,9 @@ Capture: **client ID** → `CSA_CLIENT_ID`, `BIL_JWT_AUDIENCE` in `scripts/.env`
 Navigate to **Applications → New Application → M2M Application**.
 
 - Name: `Billing Investigation Agent`
-- Change the **Access Token** type to **JWT**
-- Set **Audience** to the Customer Service Tools MCP server identifier
+- Under **Protocol**:
+  - Change the **Access Token** type to **JWT**
+  - Set **Audience** to the Customer Service Tools MCP server identifier
 - Under **API Authorization**:
   - Authorize the **Customer Service Tools** MCP server with: `billing:read`
 
@@ -456,7 +458,9 @@ kubectl get secrets -n tools-cell
 
 ### Step 9 — Render and review the Helm chart
 
-Before installing, render the chart locally to catch misconfiguration:
+All configurable chart parameters live in [helm/values.yaml](helm/values.yaml). 
+Edit anything you want to change there and render the chart locally to catch 
+misconfiguration:
 
 ```bash
 helm template cell-based-ai-agent ./helm | less
@@ -465,9 +469,6 @@ helm template cell-based-ai-agent ./helm | less
 Confirm image names, namespaces, and replica counts match your intent.
 
 ### Step 10 — Install
-
-All chart parameters live in [helm/values.yaml](helm/values.yaml). Edit
-anything you want to change there, then install:
 
 ```bash
 helm upgrade --install cell-based-ai-agent ./helm
@@ -540,7 +541,7 @@ npm install
 npm run dev
 ```
 
-Open the dev URL the Vite output prints (usually `http://localhost:3000`)
+Open the dev URL the Vite output prints (`http://localhost:3000`)
 
 ### Step 13 — (Optional) Set up the observability stack
 
@@ -621,10 +622,10 @@ From your browser, navigate to `http://localhost:3000` and sign in. Try
 these to see different parts of the architecture in action:
 
 1. **Step-up on a high-risk action.** Signed in as `customer_service_admin`,
-   ask: *"Issue a refund for charge `ch_cust_12345_001` — the customer was
-   double-charged."* `billing:refund` is step-up only, so OPA returns a
-   step-up challenge and the UI prompts for consent before the
-   refund completes.
+   ask: *"Issue a refund for 1000 USD for customer `cust_12345` and charge 
+   `ch_cust_12345_001` — the customer was double-charged."* `billing:refund` 
+   is step-up only, so OPA returns a step-up challenge and the UI prompts 
+   for consent before the refund completes.
 2. **Agent-to-agent delegation.** Ask: *"What's the billing history for
    `cust_12345` over the last six months?"* The Customer Service Assistant
    delegates over A2A to the Billing Investigation Agent, which calls the
@@ -646,7 +647,7 @@ If you set up the observability stack in Step 13, you can also watch the
 matching logs and distributed traces for each chat message in Grafana at
 `http://localhost:4000`.
 
-## Known Limitations
+## Future Improvements
 
 **Down-scoping the A2A delegation token is not yet implemented.** When the
 customer-service agent delegates to the Billing Investigation Agent over

@@ -128,8 +128,6 @@ def build_agent(
                 )
                 challenge = parse_step_up_from_tool_result(tool_call["name"], content)
                 if challenge is not None:
-                    # LangGraph restarts this node on resume, so earlier tool
-                    # calls in this batch re-executed.
                     new_token: str = interrupt({
                         "type": "step_up_required",
                         "tool_call_id": tool_call["id"],

@@ -23,12 +23,13 @@ from src.step_up_helpers import StepUpRequired
 from src.tools import ToolManager
 
 INTERCELL_GW_URL = os.getenv("INTERCELL_GW_URL")
+BILLING_AGENT_URL = os.getenv("BILLING_AGENT_URL")
 AUTH_SERVICE_URL = os.getenv("AUTH_SERVICE_URL")
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 MODEL = os.getenv("MODEL", "gemini-2.5-flash")
 AGENT_ID = os.getenv("AGENT_ID")
 
-AGENT_BASE_SCOPES: list[str] = os.getenv("AGENT_SCOPES").split()
+AGENT_BASE_SCOPES: list[str] = os.getenv("AGENT_SCOPES", "").split()
 
 TOOL_ALLOWLIST: list[str] = [
     "get_customer_profile",
@@ -160,10 +161,13 @@ async def lifespan(app: FastAPI):
 
 
 async def _build_a2a_tools():
-    if not INTERCELL_GW_URL:
+    if not INTERCELL_GW_URL or not BILLING_AGENT_URL:
         return []
 
-    conn = RemoteAgentConnection(INTERCELL_GW_URL.rstrip("/") + "/a2a")
+    conn = RemoteAgentConnection(
+        canonical_url=BILLING_AGENT_URL,
+        egress_url=INTERCELL_GW_URL.rstrip("/") + "/a2a/",
+    )
     card = await _resolve_card_with_retry(conn)
     if card is None:
         return []

@@ -35,7 +35,7 @@ TOOL_ALLOWLIST: list[str] = [
 ]
 AGENT_A2A_URL = os.getenv(
     "AGENT_A2A_URL",
-    "http://intercell-gw.customer-service-assistant-agent-cell.svc.cluster.local:8080/a2a/",
+    "http://intercell-gw.billing-investigation-agent-cell.svc.cluster.local:8080/a2a/",
 )
 HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", "8080"))

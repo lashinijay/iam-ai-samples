@@ -136,31 +136,11 @@ jwt_payload := object.get(
     {},
 )
 
-# Agent identity: innermost RFC 8693 actor claim. For a single hop this is just
-# act.sub; for a delegation chain (act nested inside act inside act …) it walks
-# down to the actor that actually made the call. The outer `act` entries describe
-# the prior links in the chain — useful for forensics but not the active actor.
-#
-# Rego v1 forbids function recursion, so the walk p → p.act → p.act.act → … is
-# unrolled to a fixed depth. 5 hops is far beyond what real OBO chains use.
-effective_actor(p) := id if {
-    p.act.act.act.act.act
-    id := object.get(p.act.act.act.act.act, "sub", "")
-} else := id if {
-    p.act.act.act.act
-    id := object.get(p.act.act.act.act, "sub", "")
-} else := id if {
-    p.act.act.act
-    id := object.get(p.act.act.act, "sub", "")
-} else := id if {
-    p.act.act
-    id := object.get(p.act.act, "sub", "")
-} else := id if {
-    p.act
-    id := object.get(p.act, "sub", "")
-} else := id if {
-    id := object.get(p, "sub", "")
-}
+# Agent identity: the current actor per RFC 8693 §4.1 — the outermost `act`
+# claim (jwt_payload.act.sub). Any nested `act` entries represent prior links
+# in the delegation chain and are informational/audit only; per RFC 8693 they
+# MUST NOT be used for access control decisions.
+effective_actor(p) := object.get(p, "sub", "")
 
 agent_id := effective_actor(object.get(jwt_payload, "act", {}))
 

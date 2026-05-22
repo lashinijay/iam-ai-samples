@@ -47,7 +47,7 @@ spec:
             - name: LOG_LEVEL
               value: "INFO"
             - name: AGENT_A2A_URL
-              value: "http://intercell-gw.{{ .Values.customerServiceAssistantAgentCell.namespace }}.svc.cluster.local:8080/a2a/"
+              value: "http://intercell-gw.{{ .Values.billingInvestigationAgentCell.namespace }}.svc.cluster.local:8080/a2a/"
             - name: AGENT_ID
               valueFrom:
                 secretKeyRef:
@@ -94,6 +94,16 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.billingInvestigationAgentCell.core.oauthCredentialsSecretName }}
                   key: CLIENT_ID
+            - name: CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.billingInvestigationAgentCell.core.oauthCredentialsSecretName }}
+                  key: CLIENT_SECRET
+            - name: REDIRECT_URI
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.billingInvestigationAgentCell.core.oauthCredentialsSecretName }}
+                  key: REDIRECT_URI
             - name: AGENT_ID
               valueFrom:
                 secretKeyRef:

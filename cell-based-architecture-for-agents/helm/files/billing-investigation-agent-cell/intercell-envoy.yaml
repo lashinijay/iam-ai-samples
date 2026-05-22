@@ -125,6 +125,15 @@ static_resources:
                       request_header:
                         name: x-a2a-task-id
                         default_value: unknown
+                    - tag: "enduser.id"
+                      metadata:
+                        kind:
+                          request: {}
+                        metadata_key:
+                          key: envoy.filters.http.jwt_authn
+                          path:
+                            - key: jwt_payload
+                            - key: sub
 
                 access_log:
                   - name: envoy.access_loggers.stdout
@@ -146,8 +155,6 @@ static_resources:
                           traceparent:      "%REQ(traceparent)%"
                           service:          "agent2-intercell-gateway"
                           invoker_agent_id: "%REQ(x-agent-id)%"
-                          invoker_user:     "%DYNAMIC_METADATA(envoy.filters.http.jwt_authn:jwt_payload:sub)%"
-                          
 
                 http_filters:
                   # Token Validation
@@ -206,7 +213,8 @@ static_resources:
                                     - key: scope
                                   value:
                                     string_match:
-                                      contains: "billing:read"
+                                      safe_regex:
+                                        regex: '^(.* )?billing:read( .*)?$'
 
                   - name: envoy.filters.http.router
                     typed_config:
@@ -346,11 +354,15 @@ static_resources:
                       start_child_span: true
 
                 route_config:
-                  name: outbound_routes
+                  name: intercell_routes
                   virtual_hosts:
-                    - name: tools
-                      domains: ["*"]
+                    # Tools cell — matched by Host header 
+                    - name: tools_cell
+                      domains:
+                        - "intercell-gw.billing-investigation-agent-cell.svc.cluster.local"
+                        - "intercell-gw.billing-investigation-agent-cell.svc.cluster.local:*"
                       routes:
+                        # MCP streamable-HTTP — GET (SSE listen stream, persistent)
                         - match:
                             prefix: /mcp
                             headers:
@@ -360,17 +372,22 @@ static_resources:
                             cluster: tools_cell_ingress
                             timeout: 0s
                             idle_timeout: 0s
+                        # MCP streamable-HTTP — POST (JSON-RPC)
                         - match:
                             prefix: /mcp
                           route:
                             cluster: tools_cell_ingress
                             timeout: 60s
+                    # Default-deny — any Host header not matched above
+                    - name: deny_unknown_destination
+                      domains: ["*"]
+                      routes:
                         - match:
                             prefix: /
                           direct_response:
                             status: 403
                             body:
-                              inline_string: '{"error":"path_not_allowed","detail":"This path is not in the inter-cell allowlist"}'
+                              inline_string: '{"error":"unknown_destination","detail":"Host header does not match any allowed callee cell"}'
 
   clusters:
     # agent2-core (inbound traffic destination)

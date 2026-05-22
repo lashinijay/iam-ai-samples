@@ -164,8 +164,11 @@ static_resources:
                 route_config:
                   name: intercell_routes
                   virtual_hosts:
-                    - name: cells
-                      domains: ["*"]
+                    # Tools cell — matched by Host header. 
+                    - name: tools_cell
+                      domains:
+                        - "intercell-gw.customer-service-assistant-agent-cell.svc.cluster.local"
+                        - "intercell-gw.customer-service-assistant-agent-cell.svc.cluster.local:*"
                       routes:
                         # MCP streamable-HTTP — GET (SSE listen stream, persistent)
                         - match:
@@ -183,6 +186,12 @@ static_resources:
                           route:
                             cluster: tools_cell_ingress
                             timeout: 60s
+                    # Billing cell — matched by Host header 
+                    - name: billing_investigation_agent_cell
+                      domains:
+                        - "intercell-gw.billing-investigation-agent-cell.svc.cluster.local"
+                        - "intercell-gw.billing-investigation-agent-cell.svc.cluster.local:*"
+                      routes:
                         # A2A: strip /a2a/ prefix; agent2-core receives at / and /.well-known/agent-card.json
                         - match:
                             prefix: /a2a/
@@ -190,13 +199,16 @@ static_resources:
                             cluster: billing_investigation_agent_cell_ingress
                             prefix_rewrite: /
                             timeout: 120s
-                        # Catch-all deny
+                    # Default-deny — any Host header not matched above
+                    - name: deny_unknown_destination
+                      domains: ["*"]
+                      routes:
                         - match:
                             prefix: /
                           direct_response:
                             status: 403
                             body:
-                              inline_string: '{"error":"path_not_allowed","detail":"This path is not in the inter-cell allowlist"}'
+                              inline_string: '{"error":"unknown_destination","detail":"Host header does not match any allowed callee cell"}'
 
   clusters:
     # Tools Cell ingress (mTLS upstream via SPIRE SDS)

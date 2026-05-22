@@ -97,6 +97,15 @@ static_resources:
                           path:
                             - key: jwt_payload
                             - key: scope
+                    - tag: "enduser.roles"
+                      metadata:
+                        kind:
+                          request: {}
+                        metadata_key:
+                          key: envoy.filters.http.jwt_authn
+                          path:
+                            - key: jwt_payload
+                            - key: roles
                     - tag: "cell.gateway"
                       literal:
                         value: "ingress"
@@ -121,9 +130,6 @@ static_resources:
                           upstream_cluster: "%UPSTREAM_CLUSTER%"
                           request_id:       "%REQ(X-REQUEST-ID)%"
                           traceparent:      "%REQ(traceparent)%"
-                          user_sub:          "%DYNAMIC_METADATA(envoy.filters.http.jwt_authn:jwt_payload:sub)%"
-                          user_scope:        "%DYNAMIC_METADATA(envoy.filters.http.jwt_authn:jwt_payload:scope)%"
-                          user_roles:        "%DYNAMIC_METADATA(envoy.filters.http.jwt_authn:jwt_payload:roles)%"
                           service:          "ingress-gateway"
 
                 http_filters:
@@ -277,7 +283,7 @@ static_resources:
                             cluster: agent_core
                             timeout: 120s
                             retry_policy:
-                              retry_on: "5xx,reset,connect-failure"
+                              retry_on: "connect-failure,refused-stream,reset-before-request"
                               num_retries: 2
                           typed_per_filter_config:
                             envoy.filters.http.rbac:

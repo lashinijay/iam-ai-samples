@@ -138,6 +138,14 @@ static_resources:
                           path:
                             - { key: jwt_payload }
                             - { key: scope }
+                    - tag: "enduser.roles"
+                      metadata:
+                        kind: { request: {} }
+                        metadata_key:
+                          key: envoy.filters.http.jwt_authn
+                          path:
+                            - { key: jwt_payload }
+                            - { key: roles }
 
                 access_log:
                   - name: envoy.access_loggers.stdout
@@ -160,9 +168,6 @@ static_resources:
                           authz_status:     "%DYNAMIC_METADATA(envoy.filters.http.ext_authz:ext_authz_status)%"
                           service:          "tools-ingress-gateway"
                           invoker_agent_id: "%REQ(x-agent-id)%"
-                          invoker_user:     "%DYNAMIC_METADATA(envoy.filters.http.jwt_authn:jwt_payload:sub)%"
-                          invoker_role:     "%DYNAMIC_METADATA(envoy.filters.http.jwt_authn:jwt_payload:roles)%"
-                          invoker_scope:    "%DYNAMIC_METADATA(envoy.filters.http.jwt_authn:jwt_payload:scope)%"
 
                 http_filters:
                   # 1. Token Validation 

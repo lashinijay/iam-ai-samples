@@ -28,6 +28,7 @@ ASGARDEO_CONFIG = AsgardeoConfig(
     base_url=os.getenv("ASGARDEO_BASE_URL"),
     client_id=os.getenv("CLIENT_ID"),
     client_secret=os.getenv("CLIENT_SECRET"),
+    redirect_uri=os.getenv("REDIRECT_URI"),
 )
 AGENT_CONFIG = AgentConfig(
     agent_id=os.getenv("AGENT_ID"),
