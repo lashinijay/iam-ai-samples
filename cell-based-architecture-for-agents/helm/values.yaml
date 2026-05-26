@@ -26,7 +26,7 @@ customerServiceAssistantAgentCell:
     replicas: 1
     image: customer-service-assistant-agent-cell/agent-core:latest
     authServiceImage: customer-service-assistant-agent-cell/auth-service:latest
-    model: google/gemini-2.5-flash
+    model: gemini-2.5-flash
     agentScopes: crm:read crm:write billing:read tickets:write
     # Keys: ASGARDEO_BASE_URL, CLIENT_ID, REDIRECT_URI, AGENT_ID, AGENT_SECRET
     oauthCredentialsSecretName: agent-oauth-credentials
@@ -57,6 +57,7 @@ billingInvestigationAgentCell:
     replicas: 2
     image: billing-investigation-agent-cell/agent-core:latest
     authSidecarImage: billing-investigation-agent-cell/auth-service:latest
+    model: gemini-2.5-flash
     agentScopes: billing:read
     # Keys: ASGARDEO_BASE_URL, CLIENT_ID, AGENT_ID, AGENT_SECRET
     oauthCredentialsSecretName: agent-oauth-credentials

@@ -458,9 +458,10 @@ kubectl get secrets -n tools-cell
 
 ### Step 9 — Render and review the Helm chart
 
-All configurable chart parameters live in [helm/values.yaml](helm/values.yaml). 
-Edit anything you want to change there and render the chart locally to catch 
-misconfiguration:
+All configurable chart parameters live in [helm/values.yaml](helm/values.yaml).
+Edit anything you want to change there — notably each cell's `core.model`,
+which picks the LLM (the provider whose `*_API_KEY` must be set in `scripts/.env`). 
+Render the chart locally to catch misconfiguration:
 
 ```bash
 helm template cell-based-ai-agent ./helm | less
@@ -622,7 +623,7 @@ From your browser, navigate to `http://localhost:3000` and sign in. Try
 these to see different parts of the architecture in action:
 
 1. **Step-up on a high-risk action.** Signed in as `customer_service_admin`,
-   ask: *"Issue a refund for 1000 USD for customer `cust_12345` and charge 
+   ask: *"Issue a refund for 1000 USD for customer `cust_12345` and charge id 
    `ch_cust_12345_001` — the customer was double-charged."* `billing:refund` 
    is step-up only, so OPA returns a step-up challenge and the UI prompts 
    for consent before the refund completes.

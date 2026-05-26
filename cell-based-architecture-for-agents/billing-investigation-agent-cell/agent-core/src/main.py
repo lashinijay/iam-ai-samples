@@ -26,7 +26,7 @@ from src.tools import ToolManager
 
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 INTERCELL_GW_URL = os.getenv("INTERCELL_GW_URL")
-MODEL = os.getenv("MODEL", "google/gemini-2.5-flash")
+MODEL = os.getenv("MODEL", "gemini-2.5-flash")
 AGENT_ID = os.getenv("AGENT_ID")
 
 TOOL_ALLOWLIST: list[str] = [

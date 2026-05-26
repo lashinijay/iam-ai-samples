@@ -53,6 +53,8 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.billingInvestigationAgentCell.core.oauthCredentialsSecretName }}
                   key: AGENT_ID
+            - name: MODEL
+              value: {{ .Values.billingInvestigationAgentCell.core.model | quote }}
           resources:
             requests:
               cpu: 200m

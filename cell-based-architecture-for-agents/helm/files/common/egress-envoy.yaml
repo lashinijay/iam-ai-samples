@@ -219,12 +219,12 @@ static_resources:
                             cluster: anthropic_api
                             auto_host_rewrite: true
                             timeout: 120s
-                        # Gemini via OpenAI-compatible endpoint
+                        # Gemini via Google AI Studio OpenAI-compatible endpoint
                         - match:
                             prefix: /v1/chat/completions
                           route:
-                            cluster: vertex_api
-                            prefix_rewrite: /v1beta1/projects/project-4ffe150e-fa84-4f7a-930/locations/us-central1/endpoints/openapi/chat/completions
+                            cluster: gemini_api
+                            prefix_rewrite: /v1beta/openai/chat/completions
                             auto_host_rewrite: true
                             timeout: 120s
                         # Health check — K8s liveness/readiness probes
@@ -281,21 +281,21 @@ static_resources:
                   address:
                     socket_address: { address: api.anthropic.com, port_value: 443 }
 
-    - name: vertex_api
+    - name: gemini_api
       type: STRICT_DNS
       lb_policy: ROUND_ROBIN
       transport_socket:
         name: envoy.transport_sockets.tls
         typed_config:
           "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext
-          sni: us-central1-aiplatform.googleapis.com
+          sni: generativelanguage.googleapis.com
       load_assignment:
-        cluster_name: vertex_api
+        cluster_name: gemini_api
         endpoints:
           - lb_endpoints:
               - endpoint:
                   address:
-                    socket_address: { address: us-central1-aiplatform.googleapis.com, port_value: 443 }
+                    socket_address: { address: generativelanguage.googleapis.com, port_value: 443 }
 
     # Guardrails — sidecar in same pod, loopback only
     - name: guardrails_service
