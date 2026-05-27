@@ -188,7 +188,7 @@ prints 3.12+.
 ### Step 2 — Clone the repository
 
 ```bash
-git clone <this-repo-url>
+git clone https://github.com/wso2/iam-ai-samples.git
 cd cell-based-architecture-for-agents
 ```
 ### Step 3 — Install SPIRE and the SPIFFE CSI driver
