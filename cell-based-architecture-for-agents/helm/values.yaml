@@ -1,0 +1,108 @@
+global:
+  otelCollectorHost: otel-collector.observability.svc.cluster.local
+
+# Set false if namespaces are managed externally.
+namespaces:
+  create: false
+
+# ──────────────────────────────────────────────────────────────────────────────
+# customer-service-assistant-agent-cell
+#   ingress-gw | agent-core (+ auth-service) | egress-gw (+ guardrails) | intercell-gw
+# ──────────────────────────────────────────────────────────────────────────────
+customerServiceAssistantAgentCell:
+  namespace: customer-service-assistant-agent-cell
+
+  ingress:
+    replicas: 2
+    envoyImage: envoyproxy/envoy:v1.31-latest
+    envsubstImage: bhgedigital/envsubst:latest
+    nodePort: 30443
+    # kubernetes.io/tls — keys: tls.crt, tls.key
+    tlsSecretName: ingress-tls
+    # Keys: JWT_ISSUER, JWT_AUDIENCE, JWKS_URI, JWKS_HOST, CORS_ALLOW_ORIGIN
+    jwtValidationSecretName: ingress-jwt-validation-config
+
+  core:
+    replicas: 1
+    image: customer-service-assistant-agent-cell/agent-core:latest
+    authServiceImage: customer-service-assistant-agent-cell/auth-service:latest
+    model: gemini-2.5-flash
+    agentScopes: crm:read crm:write billing:read tickets:write
+    # Keys: ASGARDEO_BASE_URL, CLIENT_ID, REDIRECT_URI, AGENT_ID, AGENT_SECRET
+    oauthCredentialsSecretName: agent-oauth-credentials
+
+  egress:
+    replicas: 2
+    envoyImage: envoyproxy/envoy:v1.31-latest
+    envsubstImage: bhgedigital/envsubst:latest
+    guardrailsImage: egress-gw/guardrails:latest
+    # Set only the provider(s) you use; each secret must contain key `api-key`.
+    openaiApiKeySecretName: llm-api-key-openai
+    anthropicApiKeySecretName: llm-api-key-anthropic
+    geminiApiKeySecretName: llm-api-key-gemini
+
+  intercell:
+    replicas: 2
+    envoyImage: envoyproxy/envoy:v1.31-latest
+    envsubstImage: bhgedigital/envsubst:latest
+
+# ──────────────────────────────────────────────────────────────────────────────
+# billing-investigation-agent-cell  (receives A2A from customer-service cell)
+#   agent-core (+ auth-sidecar) | egress-gw (+ guardrails) | intercell-gw
+# ──────────────────────────────────────────────────────────────────────────────
+billingInvestigationAgentCell:
+  namespace: billing-investigation-agent-cell
+
+  core:
+    replicas: 2
+    image: billing-investigation-agent-cell/agent-core:latest
+    authSidecarImage: billing-investigation-agent-cell/auth-service:latest
+    model: gemini-2.5-flash
+    agentScopes: billing:read
+    # Keys: ASGARDEO_BASE_URL, CLIENT_ID, AGENT_ID, AGENT_SECRET
+    oauthCredentialsSecretName: agent-oauth-credentials
+
+  egress:
+    replicas: 2
+    envoyImage: envoyproxy/envoy:v1.31-latest
+    envsubstImage: bhgedigital/envsubst:latest
+    guardrailsImage: egress-gw/guardrails:latest
+    # Set only the provider(s) you use; each secret must contain key `api-key`.
+    openaiApiKeySecretName: llm-api-key-openai
+    anthropicApiKeySecretName: llm-api-key-anthropic
+    geminiApiKeySecretName: llm-api-key-gemini
+
+  intercell:
+    replicas: 2
+    envoyImage: envoyproxy/envoy:v1.31-latest
+    envsubstImage: bhgedigital/envsubst:latest
+    # Keys: JWT_ISSUER, JWT_AUDIENCE, JWKS_URI, JWKS_HOST
+    jwtValidationSecretName: intercell-jwt-validation-config
+
+# ──────────────────────────────────────────────────────────────────────────────
+# tools-cell  —  tool execution with policy based authorisation
+#   tools-ingress-gw | tools-service | opa
+# ──────────────────────────────────────────────────────────────────────────────
+toolsCell:
+  namespace: tools-cell
+
+  ingress:
+    replicas: 2
+    envoyImage: envoyproxy/envoy:v1.31-latest
+    envsubstImage: bhgedigital/envsubst:latest
+    # Keys: JWT_ISSUER, JWT_AUDIENCE, JWKS_URI, JWKS_HOST
+    jwtValidationSecretName: tools-ingress-jwt-validation-config
+
+  service:
+    replicas: 2
+    image: tools-cell/tools-service:latest
+
+  # ext_authz gRPC server enforcing tool-level access policy
+  opa:
+    replicas: 2
+    image: openpolicyagent/opa:latest-envoy
+    envsubstImage: bhgedigital/envsubst:latest
+    # Secret holding the agent IDs that the policy substitutes at startup.
+    # Keys: CSA_AGENT_ID, BIL_AGENT_ID — populated from scripts/.env by
+    # scripts/create-secrets.sh.
+    agentIdsSecretName: tools-opa-agents

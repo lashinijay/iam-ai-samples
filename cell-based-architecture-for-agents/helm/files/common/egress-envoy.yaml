@@ -1,0 +1,335 @@
+# Egress Gateway 
+
+# Tracing
+tracing:
+  http:
+    name: envoy.tracers.opentelemetry
+    typed_config:
+      "@type": type.googleapis.com/envoy.config.trace.v3.OpenTelemetryConfig
+      grpc_service:
+        envoy_grpc:
+          cluster_name: otel_collector
+        timeout: 5s
+      service_name: "egress-gateway"
+      resource_detectors:
+        - name: envoy.tracers.opentelemetry.resource_detectors.environment
+          typed_config:
+            "@type": type.googleapis.com/envoy.extensions.tracers.opentelemetry.resource_detectors.v3.EnvironmentResourceDetectorConfig
+
+# Metrics
+stats_sinks:
+  - name: envoy.stat_sinks.open_telemetry
+    typed_config:
+      "@type": type.googleapis.com/envoy.extensions.stat_sinks.open_telemetry.v3.SinkConfig
+      grpc_service:
+        envoy_grpc:
+          cluster_name: otel_collector
+        timeout: 5s
+      report_counters_as_deltas: true
+
+stats_flush_interval: 15s
+
+static_resources:
+  listeners:
+    - name: egress_listener
+      address:
+        socket_address:
+          address: 0.0.0.0
+          port_value: 8080    # Plain HTTP from Agent Core (same namespace)
+      filter_chains:
+        - filters:
+            - name: envoy.filters.network.http_connection_manager
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                stat_prefix: egress_gw
+                codec_type: AUTO
+
+                # UUID per request; drives trace sampling
+                request_id_extension:
+                  typed_config:
+                    "@type": type.googleapis.com/envoy.extensions.request_id.uuid.v3.UuidRequestIdConfig
+                    use_request_id_for_trace_sampling: true
+
+                # 100% sampling; tags: LLM provider + gateway direction
+                tracing:
+                  provider:
+                    name: envoy.tracers.opentelemetry
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.config.trace.v3.OpenTelemetryConfig
+                      grpc_service:
+                        envoy_grpc:
+                          cluster_name: otel_collector
+                        timeout: 5s
+                      service_name: "egress-gateway"
+                  random_sampling:
+                    value: 100
+                  custom_tags:
+                    - tag: "gen_ai.system"
+                      metadata:
+                        kind: { request: {} }
+                        metadata_key:
+                          key: envoy.filters.http.lua
+                          path:
+                            - key: llm_provider
+                    - tag: "cell.gateway"
+                      literal:
+                        value: "egress"
+                    - tag: "agent.id"
+                      metadata:
+                        kind: { request: {} }
+                        metadata_key:
+                          key: envoy.filters.http.lua
+                          path:
+                            - key: agent_id
+
+                access_log:
+                  - name: envoy.access_loggers.stdout
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.access_loggers.stream.v3.StdoutAccessLog
+                      log_format:
+                        json_format:
+                          timestamp:        "%START_TIME%"
+                          direction:        "egress"
+                          method:           "%REQ(:METHOD)%"
+                          path:             "%REQ(:PATH)%"
+                          upstream_host:    "%UPSTREAM_HOST%"
+                          upstream_cluster: "%UPSTREAM_CLUSTER%"
+                          status:           "%RESPONSE_CODE%"
+                          response_flags:   "%RESPONSE_FLAGS%"
+                          duration_ms:      "%DURATION%"
+                          bytes_sent:       "%BYTES_SENT%"
+                          bytes_received:   "%BYTES_RECEIVED%"
+                          request_id:       "%REQ(x-request-id)%"
+                          traceparent:      "%REQ(traceparent)%"
+                          llm_provider:     "%DYNAMIC_METADATA(envoy.filters.http.lua:llm_provider)%"
+                          service:          "egress-gateway"
+                          invoker_agent_id:         "%DYNAMIC_METADATA(envoy.filters.http.lua:agent_id)%"
+                          guardrails_pii:         "%DYNAMIC_METADATA(envoy.filters.http.ext_proc:guardrails_pii)%"
+                          guardrails_injections:  "%DYNAMIC_METADATA(envoy.filters.http.ext_proc:guardrails_injections)%"
+                          llm_prompt_tokens:      "%DYNAMIC_METADATA(envoy.filters.http.ext_proc:llm_prompt_tokens)%"
+                          llm_completion_tokens:  "%DYNAMIC_METADATA(envoy.filters.http.ext_proc:llm_completion_tokens)%"
+
+                http_filters:
+                  # 1. Local rate limit — per-pod baseline; blocks runaway agent loops
+                  - name: envoy.filters.http.local_ratelimit
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.local_ratelimit.v3.LocalRateLimit
+                      stat_prefix: egress_rate_limit
+                      token_bucket:
+                        max_tokens: 120        # burst allowance
+                        tokens_per_fill: 60    # 60 req/min steady-state per pod replica
+                        fill_interval: 60s
+                      filter_enabled:
+                        runtime_key: egress_rate_limit_enabled
+                        default_value: { numerator: 100, denominator: HUNDRED }
+                      filter_enforced:
+                        runtime_key: egress_rate_limit_enforced
+                        default_value: { numerator: 100, denominator: HUNDRED }
+                      response_headers_to_add:
+                        - append_action: OVERWRITE_IF_EXISTS_OR_ADD
+                          header: { key: x-ratelimit-limit, value: "60" }
+                      status: { code: 429 }
+
+                  # 2. Guardrails — ext_proc sidecar; blocks on failure
+                  - name: envoy.filters.http.ext_proc
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.ext_proc.v3.ExternalProcessor
+                      grpc_service:
+                        envoy_grpc:
+                          cluster_name: guardrails_service
+                        timeout: 10s
+                      failure_mode_allow: false
+                      processing_mode:
+                        request_header_mode: SEND
+                        request_body_mode: BUFFERED
+                        response_header_mode: SEND
+                        response_body_mode: BUFFERED
+                      message_timeout: 30s
+
+                  # 3. API key injection from mounted K8s Secrets
+                  - name: envoy.filters.http.lua
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.lua.v3.Lua
+                      default_source_code:
+                        inline_string: |
+                          function read_key(provider)
+                            local path = "/run/secrets/" .. provider .. "/" .. provider .. "-api-key"
+                            local f = io.open(path, "r")
+                            local key = nil
+                            if f then
+                              key = f:read("*a"):gsub("%s+$", "")
+                              f:close()
+                            end
+                            return key
+                          end
+
+                          function envoy_on_request(handle)
+                            local provider = handle:headers():get("x-llm-provider") or "gemini"
+                            local agent_id = handle:headers():get("x-agent-id") or "unknown"
+                            handle:streamInfo():dynamicMetadata():set("envoy.filters.http.lua", "llm_provider", provider)
+                            handle:streamInfo():dynamicMetadata():set("envoy.filters.http.lua", "agent_id", agent_id)
+                            local key = read_key(provider)
+                            if not key then
+                              handle:respond(
+                                {[":status"] = "503"},
+                                '{"error":"api_key_not_configured","provider":"' .. provider .. '"}'
+                              )
+                              return
+                            end
+                            if provider == "anthropic" then
+                              handle:headers():replace("x-api-key", key)
+                              handle:headers():replace("anthropic-version", "2023-06-01")
+                            else
+                              handle:headers():replace("Authorization", "Bearer " .. key)
+                            end
+                            -- Strip internal headers before forwarding upstream
+                            handle:headers():remove("x-llm-provider")
+                            handle:headers():remove("x-agent-id")
+
+                            -- Prevent upstream from compressing the response
+                            handle:headers():remove("accept-encoding")
+                          end
+
+                  # 4. Router — upstream call emitted as child span
+                  - name: envoy.filters.http.router
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+                      start_child_span: true
+
+                route_config:
+                  name: egress_routes
+                  virtual_hosts:
+                    - name: llm_apis
+                      domains: ["*"]
+                      routes:
+                        # OpenAI (header-matched first to avoid catch-all)
+                        - match:
+                            prefix: /v1/chat/completions
+                            headers:
+                              - name: "x-llm-provider"
+                                exact_match: "openai"
+                          route:
+                            cluster: openai_api
+                            auto_host_rewrite: true
+                            timeout: 120s
+                        # Anthropic Messages API
+                        - match:
+                            prefix: /v1/messages
+                          route:
+                            cluster: anthropic_api
+                            auto_host_rewrite: true
+                            timeout: 120s
+                        # Gemini via Google AI Studio OpenAI-compatible endpoint
+                        - match:
+                            prefix: /v1/chat/completions
+                          route:
+                            cluster: gemini_api
+                            prefix_rewrite: /v1beta/openai/chat/completions
+                            auto_host_rewrite: true
+                            timeout: 120s
+                        # Health check — K8s liveness/readiness probes
+                        # ext_proc disabled for this route so health probes never reach the guardrails sidecar.
+                        - match:
+                            prefix: /health
+                          direct_response:
+                            status: 200
+                            body:
+                              inline_string: '{"status":"healthy","gateway":"egress"}'
+                          typed_per_filter_config:
+                            envoy.filters.http.ext_proc:
+                              "@type": type.googleapis.com/envoy.extensions.filters.http.ext_proc.v3.ExtProcPerRoute
+                              disabled: true
+                        # Catch-all: deny unapproved paths
+                        - match:
+                            prefix: /
+                          direct_response:
+                            status: 403
+                            body:
+                              inline_string: '{"error":"route_not_allowed","detail":"Only approved LLM endpoints are permitted"}'
+
+  clusters:
+    # LLM Provider APIs
+    - name: openai_api
+      type: STRICT_DNS
+      lb_policy: ROUND_ROBIN
+      transport_socket:
+        name: envoy.transport_sockets.tls
+        typed_config:
+          "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext
+          sni: api.openai.com
+      load_assignment:
+        cluster_name: openai_api
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address: { address: api.openai.com, port_value: 443 }
+
+    - name: anthropic_api
+      type: STRICT_DNS
+      lb_policy: ROUND_ROBIN
+      transport_socket:
+        name: envoy.transport_sockets.tls
+        typed_config:
+          "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext
+          sni: api.anthropic.com
+      load_assignment:
+        cluster_name: anthropic_api
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address: { address: api.anthropic.com, port_value: 443 }
+
+    - name: gemini_api
+      type: STRICT_DNS
+      lb_policy: ROUND_ROBIN
+      transport_socket:
+        name: envoy.transport_sockets.tls
+        typed_config:
+          "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext
+          sni: generativelanguage.googleapis.com
+      load_assignment:
+        cluster_name: gemini_api
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address: { address: generativelanguage.googleapis.com, port_value: 443 }
+
+    # Guardrails — sidecar in same pod, loopback only
+    - name: guardrails_service
+      type: STATIC
+      typed_extension_protocol_options:
+        envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+          "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+          explicit_http_config:
+            http2_protocol_options: {}
+      load_assignment:
+        cluster_name: guardrails_service
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address: { address: 127.0.0.1, port_value: 50052 }
+
+    # OTel Collector — single OTLP gRPC destination for traces, metrics, logs
+    - name: otel_collector
+      type: STRICT_DNS
+      lb_policy: ROUND_ROBIN
+      typed_extension_protocol_options:
+        envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+          "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+          explicit_http_config:
+            http2_protocol_options: {}
+      load_assignment:
+        cluster_name: otel_collector
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address: { address: "${OTEL_COLLECTOR_HOST}", port_value: 4317 }
+
+admin:
+  address:
+    socket_address: { address: 127.0.0.1, port_value: 9902 }

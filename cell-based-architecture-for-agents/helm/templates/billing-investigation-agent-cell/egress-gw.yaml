@@ -1,0 +1,4 @@
+﻿{{- include "cell-based-agent.egress-gw" (dict
+     "root" .
+     "namespace" .Values.billingInvestigationAgentCell.namespace
+     "values" .Values.billingInvestigationAgentCell.egress) }}

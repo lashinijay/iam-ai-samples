@@ -1,0 +1,128 @@
+﻿---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: intercell-gw
+  namespace: {{ .Values.customerServiceAssistantAgentCell.namespace }}
+  labels:
+    {{- include "cell-based-agent.labels" . | nindent 4 }}
+    app.kubernetes.io/name: intercell-gw
+    app.kubernetes.io/component: gateway
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: intercell-gw-envoy-config
+  namespace: {{ .Values.customerServiceAssistantAgentCell.namespace }}
+  labels:
+    {{- include "cell-based-agent.labels" . | nindent 4 }}
+    app.kubernetes.io/name: intercell-gw
+    app.kubernetes.io/component: gateway
+data:
+  envoy.yaml: |
+{{ .Files.Get "files/customer-service-assistant-agent-cell/intercell-envoy.yaml" | indent 4 }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: intercell-gw
+  namespace: {{ .Values.customerServiceAssistantAgentCell.namespace }}
+  labels:
+    {{- include "cell-based-agent.labels" . | nindent 4 }}
+    app.kubernetes.io/name: intercell-gw
+    app.kubernetes.io/component: gateway
+spec:
+  replicas: {{ .Values.customerServiceAssistantAgentCell.intercell.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: intercell-gw
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: intercell-gw
+        app.kubernetes.io/component: gateway
+    spec:
+      serviceAccountName: intercell-gw
+      securityContext:
+        {{- include "cell-based-agent.podSecurityContext" . | nindent 8 }}
+      initContainers:
+        - name: envsubst
+          image: {{ .Values.customerServiceAssistantAgentCell.intercell.envsubstImage }}
+          command: ["sh", "-c", "envsubst < /config-template/envoy.yaml > /etc/envoy/envoy.yaml"]
+          env:
+            - name: OTEL_COLLECTOR_HOST
+              value: {{ .Values.global.otelCollectorHost | quote }}
+          volumeMounts:
+            - name: envoy-config-template
+              mountPath: /config-template
+            - name: envoy-config-rendered
+              mountPath: /etc/envoy
+          securityContext:
+            runAsUser: 1000
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+      containers:
+        - name: envoy
+          image: {{ .Values.customerServiceAssistantAgentCell.intercell.envoyImage }}
+          args: ["-c", "/etc/envoy/envoy.yaml", "--service-cluster", "intercell-gw"]
+          ports:
+            - containerPort: 8080
+              name: http
+          volumeMounts:
+            - name: envoy-config-rendered
+              mountPath: /etc/envoy
+              readOnly: true
+            - name: spire-agent-socket
+              mountPath: /run/spire/sockets
+              readOnly: true
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          securityContext:
+            runAsUser: 101
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          readinessProbe:
+            tcpSocket:
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 30
+      volumes:
+        - name: envoy-config-template
+          configMap:
+            name: intercell-gw-envoy-config
+        - name: envoy-config-rendered
+          emptyDir: {}
+        - name: spire-agent-socket
+          csi:
+            driver: csi.spiffe.io
+            readOnly: true
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: intercell-gw
+  namespace: {{ .Values.customerServiceAssistantAgentCell.namespace }}
+  labels:
+    {{- include "cell-based-agent.labels" . | nindent 4 }}
+    app.kubernetes.io/name: intercell-gw
+    app.kubernetes.io/component: gateway
+spec:
+  selector:
+    app.kubernetes.io/name: intercell-gw
+  ports:
+    - port: 8080
+      targetPort: 8080
+      name: http

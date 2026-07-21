@@ -1,0 +1,504 @@
+# Inter-cell Gateway
+
+node:
+  id: agent2-intercell-gw
+  cluster: agent2-intercell-gw
+
+# Tracing
+tracing:
+  http:
+    name: envoy.tracers.opentelemetry
+    typed_config:
+      "@type": type.googleapis.com/envoy.config.trace.v3.OpenTelemetryConfig
+      grpc_service:
+        envoy_grpc:
+          cluster_name: otel_collector
+        timeout: 5s
+      service_name: "agent2-intercell-gateway"
+      resource_detectors:
+        - name: envoy.tracers.opentelemetry.resource_detectors.environment
+          typed_config:
+            "@type": type.googleapis.com/envoy.extensions.tracers.opentelemetry.resource_detectors.v3.EnvironmentResourceDetectorConfig
+
+# Metrics
+stats_sinks:
+  - name: envoy.stat_sinks.open_telemetry
+    typed_config:
+      "@type": type.googleapis.com/envoy.extensions.stat_sinks.open_telemetry.v3.SinkConfig
+      grpc_service:
+        envoy_grpc:
+          cluster_name: otel_collector
+        timeout: 5s
+      report_counters_as_deltas: true
+
+stats_flush_interval: 15s
+
+static_resources:
+  listeners:
+
+    # -------------------------------------------------------------------------
+    # Inbound listener (8443) — mTLS from customer-service-assistant-agent-cell's intercell-gw.
+    # Validates token, checks required scope, forwards to agent2-core.
+    # -------------------------------------------------------------------------
+    - name: inbound_listener
+      address:
+        socket_address:
+          address: 0.0.0.0
+          port_value: 8443
+      filter_chains:
+        - transport_socket:
+            name: envoy.transport_sockets.tls
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.DownstreamTlsContext
+              require_client_certificate: true
+              common_tls_context:
+                tls_certificate_sds_secret_configs:
+                  - name: "default"
+                    sds_config:
+                      resource_api_version: V3
+                      api_config_source:
+                        api_type: GRPC
+                        transport_api_version: V3
+                        grpc_services:
+                          - google_grpc:
+                              target_uri: "unix:/run/spire/sockets/api.sock"
+                              stat_prefix: spire_sds
+                              channel_credentials:
+                                local_credentials: {}
+                combined_validation_context:
+                  default_validation_context:
+                    # Restrict which workloads can call by pinning to their SPIFFE IDs. 
+                    match_typed_subject_alt_names:
+                      - san_type: URI
+                        matcher:
+                          exact: "spiffe://example.org/ns/customer-service-assistant-agent-cell/sa/intercell-gw"
+                  validation_context_sds_secret_config:
+                    name: "ROOTCA"
+                    sds_config:
+                      resource_api_version: V3
+                      api_config_source:
+                        api_type: GRPC
+                        transport_api_version: V3
+                        grpc_services:
+                          - google_grpc:
+                              target_uri: "unix:/run/spire/sockets/api.sock"
+                              stat_prefix: spire_sds
+                              channel_credentials:
+                                local_credentials: {}
+          filters:
+            - name: envoy.filters.network.http_connection_manager
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                stat_prefix: agent2_inbound_gw
+                codec_type: AUTO
+
+                forward_client_cert_details: SANITIZE_SET
+                set_current_client_cert_details:
+                  uri: true
+
+                request_id_extension:
+                  typed_config:
+                    "@type": type.googleapis.com/envoy.extensions.request_id.uuid.v3.UuidRequestIdConfig
+                    use_request_id_for_trace_sampling: true
+
+                tracing:
+                  provider:
+                    name: envoy.tracers.opentelemetry
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.config.trace.v3.OpenTelemetryConfig
+                      grpc_service:
+                        envoy_grpc:
+                          cluster_name: otel_collector
+                        timeout: 5s
+                      service_name: "agent2-intercell-gateway"
+                  random_sampling:
+                    value: 100
+                  custom_tags:
+                    - tag: "cell.gateway"
+                      literal:
+                        value: "agent2-inbound"
+                    - tag: "agent.id"
+                      request_header:
+                        name: x-agent-id
+                        default_value: unknown
+                    - tag: "a2a.task"
+                      request_header:
+                        name: x-a2a-task-id
+                        default_value: unknown
+                    - tag: "enduser.id"
+                      metadata:
+                        kind:
+                          request: {}
+                        metadata_key:
+                          key: envoy.filters.http.jwt_authn
+                          path:
+                            - key: jwt_payload
+                            - key: sub
+
+                access_log:
+                  - name: envoy.access_loggers.stdout
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.access_loggers.stream.v3.StdoutAccessLog
+                      log_format:
+                        json_format:
+                          timestamp:        "%START_TIME%"
+                          direction:        "agent2-inbound"
+                          method:           "%REQ(:METHOD)%"
+                          path:             "%REQ(:PATH)%"
+                          upstream_cluster: "%UPSTREAM_CLUSTER%"
+                          status:           "%RESPONSE_CODE%"
+                          response_flags:   "%RESPONSE_FLAGS%"
+                          duration_ms:      "%DURATION%"
+                          bytes_sent:       "%BYTES_SENT%"
+                          bytes_received:   "%BYTES_RECEIVED%"
+                          request_id:       "%REQ(x-request-id)%"
+                          traceparent:      "%REQ(traceparent)%"
+                          service:          "agent2-intercell-gateway"
+                          invoker_agent_id: "%REQ(x-agent-id)%"
+
+                http_filters:
+                  # Token Validation
+                  - name: envoy.filters.http.jwt_authn
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.jwt_authn.v3.JwtAuthentication
+                      providers:
+                        idp_obo:
+                          issuer: "${JWT_ISSUER}"
+                          audiences:
+                            - "${JWT_AUDIENCE}"
+                          from_headers:
+                            - name: authorization
+                              value_prefix: "Bearer "
+                          remote_jwks:
+                            http_uri:
+                              uri: "${JWKS_URI}"
+                              cluster: jwks_cluster
+                              timeout: 5s
+                            cache_duration:
+                              seconds: 300
+                          payload_in_metadata: "jwt_payload"
+                          forward: true
+                      rules:
+                        - match:
+                            prefix: "/.well-known"
+                          # No requires — agent card discovery is public; no token needed.
+                        - match:
+                            prefix: /
+                          requires:
+                            provider_name: idp_obo
+
+                  # Scope check — require "billing:read" in the validated JWT's scp claim.
+                  # The /.well-known/agent-card.json discovery endpoint is exempt (no JWT present).
+                  - name: envoy.filters.http.rbac
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.rbac.v3.RBAC
+                      rules:
+                        action: ALLOW
+                        policies:
+                          allow_agent_card:
+                            permissions:
+                              - url_path:
+                                  path:
+                                    prefix: "/.well-known"
+                            principals:
+                              - any: true
+                          require_scope:
+                            permissions:
+                              - any: true
+                            principals:
+                              - metadata:
+                                  filter: envoy.filters.http.jwt_authn
+                                  path:
+                                    - key: jwt_payload
+                                    - key: scope
+                                  value:
+                                    string_match:
+                                      safe_regex:
+                                        regex: '^(.* )?billing:read( .*)?$'
+
+                  - name: envoy.filters.http.router
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+                      start_child_span: true
+
+                route_config:
+                  name: inbound_routes
+                  virtual_hosts:
+                    - name: agent2
+                      domains: ["*"]
+                      routes:
+                        - match:
+                            path: "/.well-known/agent-card.json"
+                            headers:
+                              - name: ":method"
+                                string_match:
+                                  exact: GET
+                          route:
+                            cluster: agent2_service
+                            timeout: 5s
+                        - match:
+                            path: "/"
+                            headers:
+                              - name: ":method"
+                                string_match:
+                                  exact: POST
+                          route:
+                            cluster: agent2_service
+                            timeout: 120s
+                        - match:
+                            prefix: /
+                          direct_response:
+                            status: 404
+                            body:
+                              inline_string: '{"error":"not_found","detail":"Path not served by this agent"}'
+
+    # -------------------------------------------------------------------------
+    # Outbound listener (8080) — HTTP from agent2-core.
+    # Enforces MCP-only RBAC, forwards to tools-cell over mTLS.
+    # -------------------------------------------------------------------------
+    - name: outbound_listener
+      address:
+        socket_address:
+          address: 0.0.0.0
+          port_value: 8080
+      filter_chains:
+        - filters:
+            - name: envoy.filters.network.http_connection_manager
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                stat_prefix: agent2_outbound_gw
+                codec_type: AUTO
+
+                request_id_extension:
+                  typed_config:
+                    "@type": type.googleapis.com/envoy.extensions.request_id.uuid.v3.UuidRequestIdConfig
+                    use_request_id_for_trace_sampling: true
+
+                tracing:
+                  provider:
+                    name: envoy.tracers.opentelemetry
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.config.trace.v3.OpenTelemetryConfig
+                      grpc_service:
+                        envoy_grpc:
+                          cluster_name: otel_collector
+                        timeout: 5s
+                      service_name: "agent2-intercell-gateway"
+                  random_sampling:
+                    value: 100
+                  custom_tags:
+                    - tag: "cell.gateway"
+                      literal:
+                        value: "agent2-outbound"
+                    - tag: "url.path"
+                      request_header:
+                        name: ":path"
+                        default_value: unknown
+
+                access_log:
+                  - name: envoy.access_loggers.stdout
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.access_loggers.stream.v3.StdoutAccessLog
+                      log_format:
+                        json_format:
+                          timestamp:        "%START_TIME%"
+                          direction:        "agent2-outbound"
+                          method:           "%REQ(:METHOD)%"
+                          path:             "%REQ(:PATH)%"
+                          upstream:         "%UPSTREAM_HOST%"
+                          upstream_cluster: "%UPSTREAM_CLUSTER%"
+                          status:           "%RESPONSE_CODE%"
+                          response_flags:   "%RESPONSE_FLAGS%"
+                          duration_ms:      "%DURATION%"
+                          bytes_sent:       "%BYTES_SENT%"
+                          bytes_received:   "%BYTES_RECEIVED%"
+                          request_id:       "%REQ(x-request-id)%"
+                          traceparent:      "%REQ(traceparent)%"
+                          invoker_agent_id: "%REQ(x-agent-id)%"
+                          service:          "agent2-intercell-gateway"
+
+                http_filters:
+                  
+                  - name: envoy.filters.http.rbac
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.rbac.v3.RBAC
+                      rules:
+                        action: ALLOW
+                        policies:
+                          allow_mcp:
+                            permissions:
+                              - and_rules:
+                                  rules:
+                                    - header:
+                                        name: ":method"
+                                        string_match:
+                                          exact: POST
+                                    - url_path:
+                                        path:
+                                          prefix: /mcp
+                              - and_rules:
+                                  rules:
+                                    - header:
+                                        name: ":method"
+                                        string_match:
+                                          exact: GET
+                                    - url_path:
+                                        path:
+                                          prefix: /mcp
+                            principals:
+                              - any: true
+
+                  - name: envoy.filters.http.router
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+                      start_child_span: true
+
+                route_config:
+                  name: intercell_routes
+                  virtual_hosts:
+                    # Tools cell — matched by Host header 
+                    - name: tools_cell
+                      domains:
+                        - "intercell-gw.billing-investigation-agent-cell.svc.cluster.local"
+                        - "intercell-gw.billing-investigation-agent-cell.svc.cluster.local:*"
+                      routes:
+                        # MCP streamable-HTTP — GET (SSE listen stream, persistent)
+                        - match:
+                            prefix: /mcp
+                            headers:
+                              - name: ":method"
+                                exact_match: "GET"
+                          route:
+                            cluster: tools_cell_ingress
+                            timeout: 0s
+                            idle_timeout: 0s
+                        # MCP streamable-HTTP — POST (JSON-RPC)
+                        - match:
+                            prefix: /mcp
+                          route:
+                            cluster: tools_cell_ingress
+                            timeout: 60s
+                    # Default-deny — any Host header not matched above
+                    - name: deny_unknown_destination
+                      domains: ["*"]
+                      routes:
+                        - match:
+                            prefix: /
+                          direct_response:
+                            status: 403
+                            body:
+                              inline_string: '{"error":"unknown_destination","detail":"Host header does not match any allowed callee cell"}'
+
+  clusters:
+    # agent2-core (inbound traffic destination)
+    - name: agent2_service
+      type: STRICT_DNS
+      lb_policy: ROUND_ROBIN
+      load_assignment:
+        cluster_name: agent2_service
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address:
+                      address: agent2-core
+                      port_value: 8080
+
+    # Tools Cell ingress (mTLS upstream via SPIRE SDS)
+    - name: tools_cell_ingress
+      type: STRICT_DNS
+      lb_policy: ROUND_ROBIN
+      transport_socket:
+        name: envoy.transport_sockets.tls
+        typed_config:
+          "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext
+          common_tls_context:
+            tls_certificate_sds_secret_configs:
+              - name: "default"
+                sds_config:
+                  resource_api_version: V3
+                  api_config_source:
+                    api_type: GRPC
+                    transport_api_version: V3
+                    grpc_services:
+                      - google_grpc:
+                          target_uri: "unix:/run/spire/sockets/api.sock"
+                          stat_prefix: spire_sds
+                          channel_credentials:
+                            local_credentials: {}
+            combined_validation_context:
+              default_validation_context:
+                # Restrict which workloads can be reached by pinning to their SPIFFE IDs.
+                match_typed_subject_alt_names:
+                  - san_type: URI
+                    matcher:
+                      exact: "spiffe://example.org/ns/tools-cell/sa/tools-ingress-gw"
+              validation_context_sds_secret_config:
+                name: "ROOTCA"
+                sds_config:
+                  resource_api_version: V3
+                  api_config_source:
+                    api_type: GRPC
+                    transport_api_version: V3
+                    grpc_services:
+                      - google_grpc:
+                          target_uri: "unix:/run/spire/sockets/api.sock"
+                          stat_prefix: spire_sds
+                          channel_credentials:
+                            local_credentials: {}
+      load_assignment:
+        cluster_name: tools_cell_ingress
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address:
+                      address: tools-ingress-gw.tools-cell.svc.cluster.local
+                      port_value: 8443
+
+    # JWKS (IdP public keys for token verification)
+    - name: jwks_cluster
+      type: LOGICAL_DNS
+      dns_lookup_family: V4_ONLY
+      lb_policy: ROUND_ROBIN
+      transport_socket:
+        name: envoy.transport_sockets.tls
+        typed_config:
+          "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext
+          sni: "${JWKS_HOST}"
+          common_tls_context:
+            validation_context:
+              trusted_ca:
+                filename: /etc/ssl/certs/ca-certificates.crt
+      load_assignment:
+        cluster_name: jwks_cluster
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address:
+                      address: "${JWKS_HOST}"
+                      port_value: 443
+
+    # OTel collector
+    - name: otel_collector
+      type: STRICT_DNS
+      lb_policy: ROUND_ROBIN
+      typed_extension_protocol_options:
+        envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+          "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+          explicit_http_config:
+            http2_protocol_options: {}
+      load_assignment:
+        cluster_name: otel_collector
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address: { address: "${OTEL_COLLECTOR_HOST}", port_value: 4317 }
+
+admin:
+  address:
+    socket_address:
+      address: 127.0.0.1
+      port_value: 9903
